@@ -1,18 +1,18 @@
 """Write a generated day to disk.
 
 Layout of <out>/:
-  window.jsonl afk.jsonl input.jsonl terminal.jsonl fs.jsonl   ActivityWatch-shaped events
+  window.jsonl afk.jsonl input.jsonl web.jsonl terminal.jsonl fs.jsonl   ActivityWatch-shaped events
   labels.jsonl          ground-truth state segments (generator only; never a model input)
   help_requests.jsonl   when a chatbot was opened (ground truth for the help-seeking signal)
   manifest.json         seed, date, style parameters, counts
-  aw-export.json        same events as importable ActivityWatch buckets (aw-synth-* ids)
+  aw-export.json        same events as importable ActivityWatch buckets (real-style ids, synthetic host)
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from .generator import BUCKETS
+from .generator import BUCKETS, HOST
 
 
 def _jsonl(path: Path, rows) -> None:
@@ -30,7 +30,7 @@ def write_day(result: dict, outdir: str | Path) -> Path:
         _jsonl(out / f"{key}.jsonl", events)
         counts[key] = len(events)
         export[bid] = dict(id=bid, created=result["start_utc"], name=None, type=btype,
-                           client=client, hostname="synthetic", data={}, events=events)
+                           client=client, hostname=HOST, data={}, events=events)
     _jsonl(out / "labels.jsonl", result["labels"])
     _jsonl(out / "help_requests.jsonl", result["help_requests"])
     manifest = {k: result[k] for k in

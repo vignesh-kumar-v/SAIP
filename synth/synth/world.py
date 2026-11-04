@@ -343,7 +343,12 @@ def cmd_string(rng, proj: Project, kind: str, module: str | None = None) -> str:
 
 
 def terminal_title(project: str, cmd: str | None = None) -> str:
-    return f"{project} — {cmd + ' — ' if cmd else '-zsh — '}128×34"
+    """Terminal.app format: "<dir> — -zsh — 128×34" at the prompt, "<dir> — <proc> ◂ <cmd> — 128×34" while running."""
+    if not cmd:
+        return f"{project} — -zsh — 128×34"
+    proc = cmd.split()[0].lstrip("./")
+    proc = {"npx": "node", "uvicorn": "Python", "python": "Python", "pytest": "Python", "alembic": "Python"}.get(proc, proc)
+    return f"{project} — {proc} \u25c2 {cmd} — 128×34"
 
 
 # ------------------------------------------------------------------ web pages
@@ -393,11 +398,13 @@ def doc_page(rng, lib, sym=None):
 
 def lookup_page(rng, proj: Project) -> dict:
     """Everyday lookups while things are going fine."""
-    if rng.random() < 0.7:
+    r = rng.random()
+    if r < 0.66:
         return doc_page(rng, rng.choice(proj.libs))
-    st = STACKS[proj.stack]
-    t = f"How to {rng.choice(st['tasks'])} in {st['lang']} - Stack Overflow"
-    return dict(url=f"https://stackoverflow.com/questions/{rng.randint(10_000_000, 78_000_000)}/{slug(t[:-17])}", title=t)
+    if r < 0.72:                                 # background reading that looks like debugging
+        t = f"Debugging when your code {rng.choice(SYMPTOMS)} | {rng.choice(['Real Python', 'DEV Community', 'freeCodeCamp.org'])}"
+        return dict(url=f"https://dev.to/{slug(t)}-{rng.randrange(16**5):05x}", title=t)
+    return howto_page(rng, proj)
 
 
 @dataclass
@@ -435,6 +442,24 @@ def _symptom_pages(rng, st, lib, sym, symptom):
     return out
 
 
+def error_pages(rng, proj: Project, etype: str, msg: str, lib: str, n_so: tuple = (2, 3)) -> list:
+    """Search results for one error: Stack Overflow, the library's issue tracker, a blog post, maybe Reddit."""
+    st = STACKS[proj.stack]
+    short = msg if len(msg) <= 70 else msg[:67] + "..."
+    pages = [_so(rng, st, etype, short) for _ in range(rng.randint(*n_so))]
+    for p in (_gh(rng, lib, etype, short), _blog(rng, lib, etype, short),
+              _reddit(rng, st, etype) if rng.random() < 0.4 else None):
+        if p:
+            pages.append(p)
+    return pages
+
+
+def howto_page(rng, proj: Project) -> dict:
+    st = STACKS[proj.stack]
+    t = f"How to {rng.choice(st['tasks'])} in {st['lang']} - Stack Overflow"
+    return dict(url=f"https://stackoverflow.com/questions/{rng.randint(10_000_000, 78_000_000)}/{slug(t[:-17])}", title=t)
+
+
 def make_problem(rng, proj: Project, silent: bool = False) -> Problem:
     st = STACKS[proj.stack]
     if silent:
@@ -460,25 +485,23 @@ def make_problem(rng, proj: Project, silent: bool = False) -> Problem:
     fixed = dict(lib=lib, sym=sym, tmod=primary.module or "core", tname=rng.choice(TEST_NAMES))
     msg = fill(tpl, rng, st["vocab"], **fixed)
     msg2 = fill(tpl, rng, st["vocab"], **fixed)
-    short = msg if len(msg) <= 70 else msg[:67] + "..."
-    pages = [_so(rng, st, etype, short) for _ in range(rng.randint(2, 3))]
-    for p in (_gh(rng, lib, etype, short), _blog(rng, lib, etype, short),
-              _reddit(rng, st, etype) if rng.random() < 0.4 else None):
-        if p:
-            pages.append(p)
+    pages = error_pages(rng, proj, etype, msg, lib)
     pages += [doc_page(rng, lib, sym)] + ([doc_page(rng, lib)] if rng.random() < 0.5 else [])
+    if rng.random() < 0.5:                      # stuck people also open plain how-to pages, not only error pages
+        pages.append(howto_page(rng, proj))
     return Problem(etype, msg, error_sig(etype + msg), error_sig(etype + msg2) if msg2 != msg else None,
                    kind, cmd_string(rng, proj, kind, primary.module or None), lib, suspects, pages,
                    rng.choice(["Google Chrome", "Safari"]), primary.module)
 
 
 def random_error(rng, proj: Project):
-    """A one-off failure during normal work: (etype, cmd_kind, sig)."""
+    """A one-off failure during normal work: (etype, cmd_kind, sig, msg, lib)."""
     st = STACKS[proj.stack]
     etype, tpl, kind = rng.choice(st["errors"])
-    msg = fill(tpl, rng, st["vocab"], lib=rng.choice(proj.libs), sym="x", tmod=rng.choice(proj.modules),
+    lib = rng.choice(proj.libs)
+    msg = fill(tpl, rng, st["vocab"], lib=lib, sym=rng.choice(LIBS[lib]["syms"]), tmod=rng.choice(proj.modules),
                tname=rng.choice(TEST_NAMES))
-    return etype, kind, error_sig(etype + msg)
+    return etype, kind, error_sig(etype + msg), msg, lib
 
 
 # ------------------------------------------------------------------ everyday apps
@@ -644,6 +667,9 @@ def make_workspace(rng, kind: str) -> Workspace:
 
 def nc_page(rng, ws: Workspace) -> dict:
     """Everyday lookups while non-coding work is going fine."""
+    if rng.random() < 0.08:                      # a quick fix looked up in passing, same sites as when stuck
+        pr = make_nc_problem(rng, ws)
+        return rng.choice(pr.pages)
     r = rng.random()
     if ws.kind == "writing":
         if r < .45:
@@ -731,5 +757,20 @@ def long_cmd(rng, proj) -> str:
     return rng.choice(LONG_CMDS[proj.stack] + ["docker build -t app ."])
 
 
-def agent_title(project: str, glyph: str = "\u2733") -> str:
-    return f"{project} \u2014 {glyph} Claude Code \u2014 128\u00d734"
+# Claude Code renames the terminal tab to a short task summary. Real titles (Terminal.app) look like
+#   "<dir> — ◐ <task summary> — node ◂ claude — 128×34"
+# with ◐/◑ alternating about once a second while it works and ✳ while it waits for the user.
+AGENT_SPIN = ["\u25d0", "\u25d1"]
+AGENT_IDLE = "\u2733"
+AGENT_TASKS = ["Fix failing tests", "Refactor data loader", "Add EMA smoothing", "Debug import error",
+               "Explain the codebase", "Write unit tests", "Update README", "Add CLI arguments",
+               "Optimize feature extraction", "Review recent changes", "Set up logging", "Fix type errors",
+               "Add retry logic", "Clean up unused code", "Implement rolling window"]
+
+
+def agent_task(rng) -> str:
+    return rng.choice(AGENT_TASKS)
+
+
+def agent_title(project: str, glyph: str = AGENT_IDLE, task: str = "Claude Code") -> str:
+    return f"{project} \u2014 {glyph} {task} \u2014 node \u25c2 claude \u2014 128\u00d734"

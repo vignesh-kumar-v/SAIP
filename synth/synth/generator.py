@@ -35,14 +35,20 @@ from .styles import UserStyle, sample_style
 BIN = 5.0             # seconds, matches aw-watcher-input
 AFK_TIMEOUT = 180.0   # seconds, aw-watcher-afk default
 STATES = ("flow", "stuck", "distracted", "neutral")
-GENERATOR_VERSION = "0.4"
+GENERATOR_VERSION = "0.5"
+MAX_PRESSES = 26      # real aw-watcher-input max per bin
+HOST = "synthetic-macbook.local"
 
+# Same id pattern, type and client as the real watchers, so one loader reads real and synthetic exports.
+# Loaders should match buckets by *type* (and merge hosts): a hostname change on the real machine
+# creates a second set of buckets.
 BUCKETS = {
-    "window": ("aw-synth-window", "currentwindow", "synthetic-window"),
-    "afk": ("aw-synth-afk", "afkstatus", "synthetic-afk"),
-    "input": ("aw-synth-input", "os.hid.input", "synthetic-input"),
-    "terminal": ("aw-synth-terminal", "app.terminal.command", "synthetic-terminal"),
-    "fs": ("aw-synth-fs", "app.fs.activity", "synthetic-fs"),
+    "window": (f"aw-watcher-window_{HOST}", "currentwindow", "aw-watcher-window"),
+    "afk": (f"aw-watcher-afk_{HOST}", "afkstatus", "aw-watcher-afk"),
+    "input": (f"aw-watcher-input_{HOST}", "os.hid.input", "aw-watcher-input"),
+    "web": (f"aw-watcher-web-chrome_{HOST}", "web.tab.current", "aw-client-web"),
+    "terminal": (f"aw-watcher-terminal_{HOST}", "app.terminal.command", "aw-watcher-terminal"),   # custom hook
+    "fs": (f"aw-watcher-fs_{HOST}", "app.fs.activity", "aw-watcher-fs"),                          # custom hook
 }
 
 
@@ -108,7 +114,7 @@ def profile(s: UserStyle, mode: str, kind: str) -> dict:
     def P(rate, duty, burst, click, mouse, scroll):
         return dict(rate=rate, duty=duty, burst=burst, click=click,
                     mouse_p=min(mouse, 0.95), scroll_p=min(scroll, 0.95),
-                    mouse_scale=s.mouse_scale)
+                    mouse_scale=s.mouse_scale, type_mouse_p=s.type_mouse_p, scroll_x_p=s.scroll_x_p)
 
     stuck = mode == "stuck"
     if kind == "editor":
@@ -180,22 +186,30 @@ def fill(rec: Recorder, rng: random.Random, nprng: np.random.Generator,
     join = 1.0 if duty >= 0.99 else min(1.0, leave * duty / (1.0 - duty)) if typing else 0.0
     on = typing and rng.random() < duty
     for i in range(i0, i1):
+        typed = False
         if on:
-            rec.presses[i] += min(26, nprng.poisson(rate * rng.uniform(0.6, 1.4)))  # real p99 ~23
+            if rng.random() < 0.3:                            # partial bin: burst edge, shortcut, arrow keys
+                rec.presses[i] += rng.randint(1, 5)
+            else:
+                rec.presses[i] += min(26, nprng.poisson(rate * rng.uniform(0.6, 1.4)))  # real p99 ~24
+            typed = True
             if rng.random() < leave:
                 on = False
         elif typing and rng.random() < join:
             on = True
+        elif typing and rng.random() < 0.04:                  # stray shortcut (cmd-s, cmd-c) between bursts
+            rec.presses[i] += rng.randint(1, 3)
+            typed = True
         if p["click"] > 0:
             rec.clicks[i] += nprng.poisson(p["click"])
-        if rng.random() < p["mouse_p"]:                       # heavy-tailed, x and y independent
-            rec.dx[i] += float(nprng.lognormal(math.log(p["mouse_scale"]), 0.85))
-            rec.dy[i] += float(nprng.lognormal(math.log(p["mouse_scale"] * 0.55), 0.85))
+        # aw-watcher-input stores magnitudes: deltaX/deltaY/scrollX/scrollY are never negative
+        if rng.random() < p["mouse_p"] or (typed and rng.random() < p["type_mouse_p"]):
+            rec.dx[i] += float(nprng.lognormal(math.log(p["mouse_scale"]), 0.9))
+            rec.dy[i] += float(nprng.lognormal(math.log(p["mouse_scale"] * 0.55), 0.9))
         if rng.random() < p["scroll_p"]:                      # trackpad inertia: long tail
-            mag = int(min(3000, nprng.lognormal(math.log(40), 1.3)))
-            rec.sy[i] += mag if rng.random() < 0.5 else -mag
-            if rng.random() < 0.1:
-                rec.sx[i] += int(nprng.integers(-8, 9))
+            rec.sy[i] += int(min(3000, nprng.lognormal(math.log(40), 1.3)))
+            if rng.random() < p["scroll_x_p"]:
+                rec.sx[i] += int(min(1500, nprng.lognormal(math.log(8), 1.6)))
 
 
 class Player:
@@ -277,6 +291,22 @@ def help_open(rec, pl, rng, seg, kind, chat_dur, st, work_win):
     return open_chat(rec, pl, rng, seg, kind, chat_dur)
 
 
+def agent_stint(rec, pl, rng, proj, task, dur, kind="watch"):
+    """Claude Code working in a terminal tab: the title flips ◐/◑ about once a second, then ✳ when it is done."""
+    base = {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)}
+    iv = pl.run(kind, dur, base)
+    if iv:
+        t, i = iv[0] + rng.uniform(0.3, 2.0), rng.randrange(2)
+        stop = iv[1] - rng.uniform(1.0, 4.0)                   # ends idle (✳), waiting for the user
+        while t < stop:
+            d = 0.96 + (rng.random() * 0.12 if rng.random() < 0.85 else rng.uniform(0.5, 2.5))
+            rec.cmd_titles.append((t, min(t + d, stop),
+                                   {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_SPIN[i % 2], task)}))
+            t += d
+            i += 1
+    return iv, base
+
+
 class CodeUI:
     """How coding looks on screen: VS Code plus a terminal window, or vim in a terminal (maybe over ssh)."""
 
@@ -345,6 +375,7 @@ def emit_flow_coding(seg, rec, rng, nprng, st, ctx):
     app = rng.choice(BROWSERS)
     cmd_kinds = list(W.STACKS[pj.stack]["cmds"])
     tdd = None                                               # red-green loop: same failure repeats while working
+    task = W.agent_task(rng)
     while not pl.done:
         if chat_at is not None and pl.t >= chat_at:
             help_open(rec, pl, rng, seg, "incidental", rng.uniform(30, 90), st, ui.editor(ctx.file))
@@ -357,7 +388,13 @@ def emit_flow_coding(seg, rec, rng, nprng, st, ctx):
         if pl.done:
             break
         roll = rng.random()
-        if roll < 0.62:
+        if roll < 0.62 and not ui.remote and rng.random() < st.agent_flow_p:
+            # drive Claude Code: type an instruction, watch it work, approve a step
+            pl.run("chat", rng.uniform(8, 30), {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)})
+            agent_stint(rec, pl, rng, proj, task, rng.uniform(20, 120))
+            if rng.random() < 0.3:
+                task = W.agent_task(rng)
+        elif roll < 0.62:
             iv = pl.run("terminal", rng.uniform(8, 40), ui.term(ctx.file))
             if iv:
                 mod = ctx.file.module or None
@@ -368,7 +405,7 @@ def emit_flow_coding(seg, rec, rng, nprng, st, ctx):
                     add_command(rec, rng, iv, tdd["kind"], 1, tdd["sig"], tdd["etype"],
                                 W.cmd_string(rng, pj, tdd["kind"], mod), proj)
                 elif rng.random() < st.err_flow:
-                    etype, kind, sig = W.random_error(rng, pj)
+                    etype, kind, sig, msg, lib = W.random_error(rng, pj)
                     if sig == ctx.last_sig:
                         add_command(rec, rng, iv, kind, 0, None, None, W.cmd_string(rng, pj, kind, mod), proj)
                     else:
@@ -376,6 +413,10 @@ def emit_flow_coding(seg, rec, rng, nprng, st, ctx):
                         ctx.last_sig = sig
                         if rng.random() < st.tdd_p:
                             tdd = dict(etype=etype, kind=kind, sig=sig, left=rng.randint(1, 3))
+                        elif rng.random() < 0.35 and not pl.done:
+                            # quick search for the error, fixed in a minute: the same pages a stuck user opens
+                            pg = rng.choice(W.error_pages(rng, pj, etype, msg, lib, n_so=(1, 2)))
+                            pl.run("browser", rng.uniform(10, 50), bwin(app, pg))
                 else:
                     kind = rng.choice(cmd_kinds)
                     add_command(rec, rng, iv, kind, 0, None, None, W.cmd_string(rng, pj, kind, mod), proj)
@@ -600,7 +641,7 @@ def emit_waiting(seg, rec, rng, nprng, st, ctx):
         cmd = W.long_cmd(rng, pj)
         data = dict(exit_code=0, cmd_kind="build", error_sig=None, error_type=None)
         if rng.random() > 0.85:                                           # it fails at the end
-            etype, _k, sig = W.random_error(rng, pj)
+            etype, _k, sig, _m, _l = W.random_error(rng, pj)
             data.update(exit_code=1, error_sig=sig, error_type=etype)
         if not rec.hook_off:
             rec.term.append(dict(t=t0, dur=run, data=data))
@@ -614,22 +655,14 @@ def emit_waiting(seg, rec, rng, nprng, st, ctx):
             elif r < 0.55:
                 pl.run("email", rng.uniform(15, 60), W.slack_win(rng))
     else:
-        base = {"app": "Terminal", "title": W.agent_title(proj)}
+        task = W.agent_task(rng)
+        base = {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)}
         if not rec.hook_off:
             rec.term.append(dict(t=t0, dur=run, data=dict(exit_code=0, cmd_kind="agent", error_sig=None,
                                                           error_type=None)))
         pl.run("watch", lead, ui.term(ctx.file))
-        i = 0
         while not pl.done:
-            iv = pl.run("watch", rng.uniform(25, 100), base)             # agent works, output scrolls
-            if iv:
-                t = iv[0] + 0.5
-                while t < iv[1] - 1.0:                                    # animated spinner in the title
-                    d = 0.96 + rng.random() * 0.12
-                    rec.cmd_titles.append((t, min(t + d, iv[1] - 0.5),
-                                           {"app": "Terminal", "title": W.agent_title(proj, C.SPINNER[i % len(C.SPINNER)])}))
-                    t += d
-                    i += 1
+            agent_stint(rec, pl, rng, proj, task, rng.uniform(25, 100))  # agent works, output scrolls
             r = rng.random()
             if r < 0.4:                                                   # approve a tool call
                 iv = pl.run("watch", rng.uniform(3, 10), base)
@@ -789,54 +822,108 @@ def iso(t0: datetime, t: float) -> str:
     return (t0 + timedelta(milliseconds=round(t * 1000))).isoformat()
 
 
-def build_events(rec: Recorder, t0: datetime, length: float) -> dict:
+def _boundaries(rng, n, length, level):
+    """Input bin edges. The real watcher's bins drift a few ms and sometimes poll early (3.6-5 s bins)."""
+    b = [0.0]
+    for k in range(1, n):
+        j = rng.uniform(0.0, 0.012) if level > 0 else 0.0
+        if level > 0 and rng.random() < 0.004 * level:
+            j = -rng.uniform(0.3, 1.4)
+        b.append(k * BIN + j)
+    b.append(length)
+    return b
+
+
+def build_events(rec: Recorder, t0: datetime, length: float, rng: random.Random | None = None,
+                 level: float = 0.0) -> dict:
+    rng = rng or random.Random(0)
+    rec.presses = np.minimum(rec.presses, MAX_PRESSES)
+
     # --- window
     window = []
     for k, (t, data) in enumerate(rec.focus):
         end = rec.focus[k + 1][0] if k + 1 < len(rec.focus) else length
         if end - t > 1e-6:
+            if level > 0 and window and rng.random() < 0.004 * level:
+                window.append(dict(timestamp=iso(t0, t), duration=0.0, data=data))   # real zero-length heartbeat
             window.append(dict(timestamp=iso(t0, t), duration=round(end - t, 3), data=data))
 
-    # --- input (merge consecutive all-zero bins like the real watcher does)
-    inp, i = [], 0
-    while i < rec.n:
-        row = (int(rec.presses[i]), int(rec.clicks[i]), float(rec.dx[i]), float(rec.dy[i]),
-               int(rec.sx[i]), int(rec.sy[i]))
-        j = i + 1
-        if not any(row):
-            while j < rec.n and not (rec.presses[j] or rec.clicks[j] or rec.dx[j] or rec.dy[j]
-                                     or rec.sx[j] or rec.sy[j]):
-                j += 1
-        t_a, t_b = i * BIN, min(j * BIN, length)
-        inp.append(dict(timestamp=iso(t0, t_a), duration=round(t_b - t_a, 3), data=dict(
-            presses=row[0], clicks=row[1], deltaX=round(row[2], 3), deltaY=round(row[3], 3),
-            scrollX=row[4], scrollY=row[5])))
-        i = j
+    # --- input: one cell per 5 s bin; a missed poll folds the next bin in (a ~10 s event)
+    edges = _boundaries(rng, rec.n, length, level)
 
-    # --- afk, derived from input activity
+    def row(i):
+        return (int(rec.presses[i]), int(rec.clicks[i]), float(rec.dx[i]), float(rec.dy[i]),
+                int(rec.sx[i]), int(rec.sy[i]))
+
+    cells, i = [], 0
+    while i < rec.n:
+        r = row(i)
+        if (level > 0 and any(r) and i + 1 < rec.n and any(row(i + 1)) and edges[i] >= i * BIN
+                and edges[i + 2] <= (i + 2) * BIN + 0.012 and rng.random() < 0.003 * level):
+            r2 = row(i + 1)
+            r = (min(MAX_PRESSES, r[0] + r2[0]),) + tuple(a + b for a, b in zip(r[1:], r2[1:]))
+            cells.append((i, i + 2, r))
+            i += 2
+        else:
+            cells.append((i, i + 1, r))
+            i += 1
+    inp, c = [], 0
+    while c < len(cells):
+        a, b, r = cells[c]
+        d = c + 1
+        if not any(r):                                        # merge consecutive all-zero bins like the real watcher
+            while d < len(cells) and not any(cells[d][2]):
+                b = cells[d][1]
+                d += 1
+        t_a, t_b = edges[a], edges[b]
+        inp.append(dict(timestamp=iso(t0, t_a), duration=round(t_b - t_a, 3), data=dict(
+            presses=r[0], clicks=r[1], deltaX=round(r[2], 3), deltaY=round(r[3], 3),
+            scrollX=r[4], scrollY=r[5])))
+        c = d
+
+    # --- afk, derived from input activity (180 s without input), plus short wake-up flaps
     active = np.flatnonzero((rec.presses > 0) | (rec.clicks > 0) | (rec.dx > 0) | (rec.dy > 0)
                             | (rec.sx != 0) | (rec.sy != 0))
     afk_iv, prev_end = [], 0.0
     for k in list(active) + [rec.n]:
-        start = k * BIN
+        start = edges[k] if k < rec.n else length
         if start - prev_end >= AFK_TIMEOUT:
             afk_iv.append((prev_end, min(start, length)))
         if k < rec.n:
-            prev_end = (k + 1) * BIN
-    afk, cur = [], 0.0
+            prev_end = edges[k + 1]
+    rows = []                                                 # (start, end, status)
+    cur = 0.0
     for a, b in afk_iv:
         if a - cur > 1e-6:
-            afk.append(dict(timestamp=iso(t0, cur), duration=round(a - cur, 3), data={"status": "not-afk"}))
-        afk.append(dict(timestamp=iso(t0, a), duration=round(b - a, 3), data={"status": "afk"}))
+            rows.append((cur, a, "not-afk"))
+        if level > 0 and b < length - 1 and b - a > AFK_TIMEOUT + 60 and rng.random() < 0.35 * level:
+            # real traces show 0-15 s afk/not-afk flaps when the machine wakes or the screen unlocks
+            x = b - rng.uniform(8, 25)
+            u = 0.0 if rng.random() < 0.4 else rng.uniform(3, min(15, b - x - 1))
+            rows += [(a, x, "afk"), (x, x + u, "not-afk"), (x + u, b, "afk")]
+        else:
+            rows.append((a, b, "afk"))
         cur = b
     if length - cur > 1e-6:
-        afk.append(dict(timestamp=iso(t0, cur), duration=round(length - cur, 3), data={"status": "not-afk"}))
+        rows.append((cur, length, "not-afk"))
+    afk = [dict(timestamp=iso(t0, a), duration=round(b - a, 3), data={"status": st}) for a, b, st in rows]
+
+    # --- web: aw-watcher-web (Chrome extension) mirrors the focused Chrome tab, with tab metadata
+    web, tabs = [], rng.randint(6, 30)
+    for e in window:
+        d = e["data"]
+        if d.get("app") == "Google Chrome" and d.get("url"):
+            if rng.random() < 0.08:
+                tabs = int(min(40, max(1, tabs + rng.choice([-2, -1, 1, 1, 2]))))
+            web.append(dict(timestamp=e["timestamp"], duration=e["duration"], data=dict(
+                url=d["url"], title=d["title"], audible="youtube.com/watch" in d["url"],
+                incognito=False, tabCount=tabs)))
 
     def fmt(rows):
         return [dict(timestamp=iso(t0, r["t"]), duration=round(r["dur"], 3), data=r["data"])
                 for r in sorted(rows, key=lambda r: r["t"]) if 0 <= r["t"] < length]
 
-    return dict(window=window, afk=afk, input=inp, terminal=fmt(rec.term), fs=fmt(rec.fs))
+    return dict(window=window, afk=afk, input=inp, web=web, terminal=fmt(rec.term), fs=fmt(rec.fs))
 
 
 def generate_day(seed: int, day: date, tz_offset_h: float = -7.0,
@@ -885,7 +972,7 @@ def generate_day(seed: int, day: date, tz_offset_h: float = -7.0,
     apply_noise(rec, rng, nprng, st,
                 [(s.start, s.end, s.state, s.subtype, s.meta.get("libs")) for s in segments],
                 noise, length)
-    events = build_events(rec, t0, length)
+    events = build_events(rec, t0, length, rng, noise)
     labels = [dict(segment=s.idx, state=s.state, subtype=s.subtype, outcome=s.outcome,
                    sensitive=s.sensitive, topic=s.topic, meta=s.meta,
                    start=iso(t0, s.start), end=iso(t0, s.end),

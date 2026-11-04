@@ -7,9 +7,13 @@ from __future__ import annotations
 
 CHAT_WINDOWS = [
     {"app": "Claude", "title": "Claude"},
+    {"app": "Claude", "title": "Claude"},
+    {"app": "Gemini", "title": "Gemini \u2014 New chat"},          # standalone desktop/PWA apps, seen in real traces
+    {"app": "ChatGPT", "title": "ChatGPT"},
     {"app": "Google Chrome", "title": "ChatGPT", "url": "https://chatgpt.com/"},
     {"app": "Google Chrome", "title": "Claude", "url": "https://claude.ai/new"},
 ]
+CHAT_APPS = {"Claude", "ChatGPT", "Gemini"}
 
 # Sensitive apps the exclusion filter must drop.
 SENSITIVE_WINDOWS = [
@@ -36,11 +40,13 @@ NOISE_WINDOWS = [
     {"app": "Activity Monitor", "title": "Activity Monitor"},
     {"app": "Calendar", "title": "Calendar"},
     {"app": "Spotify", "title": "Spotify"},
+    {"app": "YT Music", "title": "YouTube Music"},
+    {"app": "", "title": ""},                                       # real watcher sometimes reports no app at all
     {"app": "Messages", "title": "Messages"},                       # sensitive: must be filtered
     {"app": "‎WhatsApp", "title": "‎WhatsApp"},           # sensitive
 ]
 
-SPINNER = ["⠋", "⠙", "⠹", "⠸"]                  # terminal title spinner frames
+SPINNER = ["⠋", "⠙", "⠹", "⠸"]                  # shell tool spinner frames (rare in real Terminal.app traces)
 
 LOCK_WIN = {"app": "loginwindow", "title": ""}
 

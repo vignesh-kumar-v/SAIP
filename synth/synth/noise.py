@@ -20,6 +20,7 @@ import numpy as np
 
 from . import content as C
 from . import world as W
+from .categories import category
 
 BIN = 5.0
 # Flicks come from the user pressing cmd-tab, so they need presence (not while away) but their
@@ -102,7 +103,7 @@ def _overlays(rng, nprng, st, level, old, k, a, b, win, mult, rec, flick_starts,
                     ov.append((s, f["t"], w))
 
     # --- animated terminal title (spinner) while a process runs
-    if (win["app"] == "Terminal" and "VIM" not in win["title"] and "Claude Code" not in win["title"]
+    if (win["app"] == "Terminal" and category(win) == "terminal"
             and rng.random() < min(1.0, st.title_churn_p * level)):
         t = a + rng.uniform(0.5, 3.0)
         stop = min(b - 0.6, t + rng.uniform(10, 45))
@@ -203,6 +204,8 @@ def noise_terminal(rec, rng, nprng, level, length):
     """Quick shell commands: ls, cd, git status. A few benign non-zero exits."""
     for k, (a, win) in enumerate(rec.focus):
         if win["app"] != "Terminal" or "ssh://" in win["title"]:     # no zsh hook on remote hosts
+            continue
+        if category(win) in ("agent", "terminal_editor"):           # vim / Claude Code own the tab: no shell prompt
             continue
         b = rec.focus[k + 1][0] if k + 1 < len(rec.focus) else length
         if b - a < 6:

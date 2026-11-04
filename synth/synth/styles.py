@@ -43,6 +43,10 @@ class UserStyle:
     review_p: float             # chance a flow block is reading/reviewing instead of typing
     agent_p: float              # chance a coding wait is supervising an AI agent (vs a build/training run)
     vim_p: float                # chance a coding block is terminal-only (vim/tmux, maybe over ssh)
+    trackpad: bool              # trackpad user: hand rests on it, so the pointer moves in most active bins
+    type_mouse_p: float         # chance a typing bin also has pointer movement
+    scroll_x_p: float           # chance a scroll bin also scrolls horizontally (trackpads do this a lot)
+    agent_flow_p: float         # chance a flow terminal stint is driving Claude Code instead of a shell
     flow_mean_min: float
     stuck_mean_min: float
     neutral_mean_min: float
@@ -55,13 +59,17 @@ class UserStyle:
 def sample_style(rng: random.Random) -> UserStyle:
     u = rng.uniform
     lu = lambda lo, hi: math.exp(rng.uniform(math.log(lo), math.log(hi)))
+    # Ranges below were re-calibrated against a real aw-watcher-input trace (MacBook, trackpad):
+    # pointer moves in ~80% of active bins (70% of typing bins), scroll in ~50%, horizontal scroll in ~40%,
+    # keypresses per typing bin median ~4 / p90 ~18, tiny idle nudges in <1% of active bins.
+    trackpad = rng.random() < 0.7
     return UserStyle(
-        typing_rate=u(8, 24),
+        typing_rate=u(6, 20),
         flow_duty=u(0.3, 0.8),
         burst_bins=u(3, 9),
-        mouse_p=u(0.10, 0.35),
-        mouse_scale=u(250, 700),
-        scroll_p=u(0.08, 0.25),
+        mouse_p=u(0.45, 0.80) if trackpad else u(0.15, 0.40),
+        mouse_scale=u(350, 800),
+        scroll_p=u(0.25, 0.50) if trackpad else u(0.08, 0.25),
         flow_switch_per_min=u(0.12, 0.45),
         stuck_pace=u(0.45, 1.5),
         err_flow=u(0.06, 0.22),
@@ -73,8 +81,8 @@ def sample_style(rng: random.Random) -> UserStyle:
         flick_per_min=u(0.3, 1.6),
         cluster_p=u(0.15, 0.40),
         tab_peek_per_min=u(0.2, 0.9),
-        jitter_p=u(0.03, 0.10),
-        title_churn_p=u(0.0, 0.6),
+        jitter_p=u(0.01, 0.04),
+        title_churn_p=u(0.0, 0.2),
         stuck_type_mult=lu(0.5, 2.3),
         stuck_duty=u(0.35, 0.9),
         stuck_burst=u(2, 6),
@@ -86,6 +94,10 @@ def sample_style(rng: random.Random) -> UserStyle:
         review_p=u(0.08, 0.3),
         agent_p=u(0.0, 0.8),
         vim_p=0.8 if rng.random() < 0.25 else 0.05,
+        trackpad=trackpad,
+        type_mouse_p=u(0.45, 0.75) if trackpad else u(0.10, 0.30),
+        scroll_x_p=u(0.7, 0.95) if trackpad else u(0.0, 0.1),
+        agent_flow_p=0.6 if rng.random() < 0.4 else u(0.0, 0.2),
         flow_mean_min=u(14, 26),
         stuck_mean_min=u(5, 10),
         neutral_mean_min=u(4, 9),

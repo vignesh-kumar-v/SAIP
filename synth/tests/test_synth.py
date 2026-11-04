@@ -56,22 +56,28 @@ def test_streams_tile_the_day_without_overlap(days, bucket):
     for d in days.values():
         ev = d["events"][bucket]
         end = 0.0
+        zero = 0
         for e in ev:
             start = t(e["timestamp"]) - t(d["start_utc"])
             assert start == pytest.approx(end, abs=0.01)
-            assert e["duration"] > 0
+            assert e["duration"] >= 0
+            zero += e["duration"] == 0
             end = start + e["duration"]
         assert end == pytest.approx(d["length_s"], abs=0.01)
+        # real watchers emit a few zero-length events (afk flaps on wake-up are relatively more common)
+        assert zero <= (max(3, 0.25 * len(ev)) if bucket == "afk" else max(3, 0.02 * len(ev)))
 
 
 def test_input_is_counts_only(days):
     for d in days.values():
         for e in d["events"]["input"]:
             assert set(e["data"]) == INPUT_KEYS
-            assert all(v >= 0 for k, v in e["data"].items() if k in ("presses", "clicks", "deltaX", "deltaY"))
+            # the real watcher stores magnitudes: no negative deltas or scrolls
+            assert all(v >= 0 for v in e["data"].values())
+            assert e["data"]["presses"] <= 26
             nonzero = any(e["data"].values())
             if nonzero:
-                assert e["duration"] == pytest.approx(BIN)
+                assert 3.5 <= e["duration"] <= 2 * BIN + 0.1   # ~5 s, early polls and missed polls happen
 
 
 def test_terminal_and_fs_hold_no_free_text(days):
@@ -90,11 +96,14 @@ def test_terminal_and_fs_hold_no_free_text(days):
 
 
 def test_afk_never_triggers_inside_short_gaps(days):
-    # every afk interval must be at least the timeout long (derived from input idleness)
+    # afk needs the full timeout of no input; the only shorter afk events are wake-up flaps that
+    # directly follow a short not-afk blip inside a long absence (seen in real traces)
     for d in days.values():
-        for e in d["events"]["afk"]:
-            if e["data"]["status"] == "afk":
-                assert e["duration"] >= AFK_TIMEOUT - 1e-6
+        ev = d["events"]["afk"]
+        for k, e in enumerate(ev):
+            if e["data"]["status"] == "afk" and e["duration"] < AFK_TIMEOUT - 1e-6:
+                assert e["duration"] <= 30
+                assert k >= 2 and ev[k - 1]["duration"] <= 15 and ev[k - 2]["data"]["status"] == "afk"
 
 
 def test_no_input_during_afk(days):
@@ -109,7 +118,8 @@ def test_no_input_during_afk(days):
 
 def test_help_requests_match_windows(days):
     from synth.categories import WORK_CATEGORIES
-    chat_apps = {"Claude", "ChatGPT"}
+    from synth.content import CHAT_APPS
+    chat_apps = CHAT_APPS
     for d in days.values():
         starts = {e["timestamp"] for e in d["events"]["window"]}
         win = [(t(e["timestamp"]), t(e["timestamp"]) + e["duration"], e["data"]) for e in d["events"]["window"]]
@@ -117,16 +127,16 @@ def test_help_requests_match_windows(days):
             assert h["kind"] in {"stuck_help", "incidental", "stuck_help_inline", "incidental_inline"}
             if h["kind"].endswith("_inline"):
                 # help asked inside the work app: no chat window exists, the work window just stays in front
-                cover = [w for a, b, w in win if a <= t(h["timestamp"]) < b]
-                assert cover and category(cover[0]) in WORK_CATEGORIES
+                cover = [w for a, b, w in win if a <= t(h["timestamp"]) + 0.002]   # last window started by then
+                assert cover and category(cover[-1]) in WORK_CATEGORIES
             else:
                 assert h["timestamp"] in starts
                 assert h["app"] in chat_apps | {"Google Chrome"}
 
 
-def test_stuck_repeats_errors_more_than_flow(days):
+def test_stuck_repeats_errors_more_than_flow(many):
     rep_stuck, rep_flow = [], []
-    for d in days.values():
+    for d in many.values():
         s = summarize(d)
         if s["stuck"]["repeat_error_pct"] is not None:
             rep_stuck.append(s["stuck"]["repeat_error_pct"])
@@ -181,8 +191,10 @@ def short_share(d):
 
 def test_noise_adds_short_window_events(days):
     clean = generate_day(1, DAY, noise=0)
-    assert short_share(clean) < 0.2             # only brief command-title and agent-spinner changes remain
-    assert all(0.25 < short_share(d) < 0.9 for d in days.values())
+    # without noise, the only short events left are terminal command titles and Claude Code spinner frames
+    assert all(e["data"]["app"] == "Terminal" for e in clean["events"]["window"] if e["duration"] < 2)
+    # real traces: ~30% of window events are short during mixed work, ~60% on heavy Claude Code days
+    assert all(0.15 < short_share(d) < 0.9 for d in days.values())
     cleans = {s: generate_day(s, DAY, noise=0) for s in days}
     # agent-spinner days are already full of 1 s title frames, so compare volume per seed, share on average
     assert all(len(d["events"]["window"]) > len(cleans[s]["events"]["window"]) for s, d in days.items())
@@ -270,8 +282,9 @@ def test_stuck_pages_match_the_error():
             if len(pages) < 2:
                 continue
             checked += 1
-            kws = [k.lower().replace("-", "") for k in l["meta"]["keywords"] if k]
-            hits = sum(any(k in p.lower().replace("-", "") for k in kws) for p in pages)
+            norm = lambda x: x.lower().replace("-", "").replace(" ", "")
+            kws = [norm(k) for k in l["meta"]["keywords"] if k]
+            hits = sum(any(k in norm(p) for k in kws) for p in pages)
             assert hits / len(pages) >= 0.4
     assert checked > 3
 
@@ -403,7 +416,7 @@ def nudge_rate(many, pred):
         spans = [(t(l["start"]), t(l["end"])) for l in d["labels"] if pred(l)]
         for e in d["events"]["input"]:
             x = e["data"]
-            if e["duration"] != pytest.approx(5.0) or not any(x.values()):
+            if abs(e["duration"] - 5.0) > 0.05 or not any(x.values()):
                 continue
             mid = t(e["timestamp"]) + 2.5
             n += any(a <= mid < b for a, b in spans)
@@ -525,7 +538,7 @@ def test_waiting_is_labeled_neutral_and_looks_busy_but_idle(clean):
                     assert any(e["data"]["app"] == "Terminal" and e["duration"] > 30 for e in wins)
             else:
                 agents += 1
-                frames = [e for e in wins if "Claude Code" in e["data"]["title"]]
+                frames = [e for e in wins if "claude" in e["data"]["title"]]
                 assert len(frames) > 15
                 assert all(category(e["data"]) == "agent" for e in frames)
     assert builds >= 5 and agents >= 3
@@ -535,15 +548,88 @@ def test_categories_for_terminal_editing_and_agents():
     assert category({"app": "Terminal", "title": "a.py (proj) - VIM"}) == "terminal_editor"
     assert category({"app": "Terminal", "title": "a.py (ssh://gpu-box/proj) - VIM"}) == "terminal_editor"
     assert category({"app": "Terminal", "title": "proj \u2014 \u2733 Claude Code \u2014 128\u00d734"}) == "agent"
+    # the format real Claude Code sessions actually produce
+    assert category({"app": "Terminal", "title": "proj \u2014 \u25d0 Fix failing tests \u2014 node \u25c2 claude \u2014 128\u00d734"}) == "agent"
     assert category({"app": "Terminal", "title": "proj \u2014 -zsh \u2014 128\u00d734"}) == "terminal"
+    assert category({"app": "Terminal", "title": "proj \u2014 Python \u25c2 pytest -q \u2014 128\u00d734"}) == "terminal"
+
+
+def test_categories_for_real_world_apps():
+    assert category({"app": "Gemini", "title": "Gemini \u2014 New chat"}) == "chat"
+    assert category({"app": "ChatGPT", "title": "ChatGPT"}) == "chat"
+    assert category({"app": "Google Chrome", "title": "x", "url": "https://gemini.google.com/app"}) == "chat"
+    assert category({"app": "YT Music", "title": "x"}) == "media"
+    assert category({"app": "", "title": ""}) == "unknown"
 
 
 def test_writer_roundtrip(tmp_path, days):
     out = write_day(days[1], tmp_path / "d")
-    for name in ["window", "afk", "input", "terminal", "fs", "labels", "help_requests"]:
+    for name in ["window", "afk", "input", "web", "terminal", "fs", "labels"]:
         rows = [json.loads(line) for line in (out / f"{name}.jsonl").read_text().splitlines()]
         assert rows
+    assert (out / "help_requests.jsonl").exists()        # may be empty: some days nobody opens a chatbot
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["seed"] == 1 and "Synthetic" in manifest["note"]
     export = json.loads((out / "aw-export.json").read_text())
-    assert set(export["buckets"]) == {"aw-synth-" + k for k in ["window", "afk", "input", "terminal", "fs"]}
+    from synth.generator import HOST
+    names = ["window", "afk", "input", "web-chrome", "terminal", "fs"]
+    assert set(export["buckets"]) == {f"aw-watcher-{k}_{HOST}" for k in names}
+    types = {b["type"] for b in export["buckets"].values()}
+    assert {"currentwindow", "afkstatus", "os.hid.input", "web.tab.current"} <= types
+
+
+# ------------------------------------------------------------------ realism vs a real export
+def test_pointer_moves_in_most_active_bins(many):
+    # real MacBook trace: ~80% of active bins move the pointer, ~70% of typing bins too
+    shares = []
+    for d in many.values():
+        act = [e["data"] for e in d["events"]["input"] if any(e["data"].values())]
+        shares.append(sum(x["deltaX"] + x["deltaY"] > 0 for x in act) / len(act))
+    assert max(shares) > 0.7 and sum(shares) / len(shares) > 0.5
+
+
+def test_horizontal_scroll_is_common_for_trackpad_users(many):
+    shares = [sum(e["data"]["scrollX"] > 0 for e in d["events"]["input"] if any(e["data"].values()))
+              / sum(1 for e in d["events"]["input"] if any(e["data"].values())) for d in many.values()]
+    assert max(shares) > 0.2
+
+
+def test_agent_titles_use_the_real_claude_code_format(days):
+    frames = [e["data"]["title"] for d in days.values() for e in d["events"]["window"]
+              if e["data"]["app"] == "Terminal" and "claude" in e["data"]["title"]]
+    assert len(frames) > 100
+    assert all("\u25c2 claude" in x for x in frames)
+    spin = sum(("\u25d0" in x) or ("\u25d1" in x) for x in frames)
+    assert spin / len(frames) > 0.6                     # mostly working frames, some idle (✳)
+
+
+def test_no_shell_commands_inside_vim_or_agent_tabs():
+    for d in (generate_day(s, DAY) for s in SEEDS):
+        spans = [(t(e["timestamp"]), t(e["timestamp"]) + e["duration"]) for e in d["events"]["window"]
+                 if category(e["data"]) in ("agent", "terminal_editor") and e["duration"] > 0]
+        for e in d["events"]["terminal"]:
+            if e["data"]["cmd_kind"] == "shell":
+                x = t(e["timestamp"])
+                assert not any(a <= x < b for a, b in spans)
+
+
+def test_web_bucket_mirrors_chrome_tabs(days):
+    for d in days.values():
+        chrome = [e for e in d["events"]["window"] if e["data"]["app"] == "Google Chrome" and e["data"].get("url")]
+        web = d["events"]["web"]
+        assert len(web) == len(chrome)
+        for e in web:
+            assert set(e["data"]) == {"url", "title", "audible", "incognito", "tabCount"}
+            assert 1 <= e["data"]["tabCount"] <= 40
+
+
+def test_error_pages_are_not_exclusive_to_stuck(many):
+    # a "How to fix ..." title must not be a perfect stuck detector
+    where = collections.Counter()
+    for d in many.values():
+        segs = [(t(l["start"]), t(l["end"]), l["state"]) for l in d["labels"]]
+        for e in d["events"]["window"]:
+            if "How to fix" in e["data"]["title"] or "How to Fix" in e["data"]["title"]:
+                x = t(e["timestamp"])
+                where[next(s for a, b, s in segs if a <= x < b)] += 1
+    assert where["stuck"] > 0 and where["flow"] / (where["stuck"] + where["flow"]) > 0.15
