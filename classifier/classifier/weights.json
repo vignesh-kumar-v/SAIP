@@ -1,0 +1,14 @@
+{
+  "with_hooks": {
+    "bias": -3.5,
+    "weights": {"circling": 7.0, "revisits": 1.0, "toggling": 0.3, "stalling": 0.4, "reaching": -0.5, "typing": 0.0,
+                "ai_share": -0.8, "failures": 3.0, "repeats": 2.0, "progress": -2.5},
+    "threshold": 0.1
+  },
+  "window_input_afk": {
+    "bias": -3.2,
+    "weights": {"circling": 8.0, "revisits": 1.5, "toggling": 0.5, "stalling": 0.4, "reaching": -0.5, "typing": 0.0,
+                "ai_share": -1.0},
+    "threshold": 0.19
+  }
+}
