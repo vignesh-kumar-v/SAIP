@@ -4,12 +4,12 @@
 The goal of this project is to build a proactive agent that understands when to interrupt based on whether the user is in a "flow" state or a "stuck" state. We will build this in five phases, starting from gathering reliable data to deploying a dynamic, threshold-based LLM.
 
 ## Phase 1: Data Collection & Ground Truth
-**The Intuition:** Before we can teach an AI when to interrupt, we need to know what being "stuck" or "in flow" looks like in the data. We need to collect background activity and match it to moments when someone actually reaches out for help. 
+**The Intuition:** Before we can teach an AI when to interrupt, we need to know what being "stuck" or "in flow" looks like in the data. We need to collect background activity and match it to manually labelled moments of being stuck, using help-seeking as supporting evidence. 
 
 **Detailed Execution:**
 *   **Set up telemetry loggers:** Install background trackers like ActivityWatcher or LifeTrace. We need to capture window switches, typing burst rates (not the actual keys, just the volume), and terminal errors.
-*   **Capture natural help-seeking:** Instead of relying on a custom hotkey (which breaks natural habits), log the exact timestamps when a user voluntarily opens an AI chatbot for help. 
-*   **Validate signals against ground truth:** Compare the background telemetry logs against the moments users sought help and your manual screenshot labels. If the logs don't show a clear pattern before a help request, the signals need adjustment.
+*   **Capture natural help-seeking as weak evidence:** Instead of relying on a custom hotkey (which breaks natural habits), log the exact timestamps when a user voluntarily opens an AI chatbot. Opening a chatbot does not by itself mean the user is stuck: they may be brainstorming, directing an agent, or taking a quick look at an answer. Help-seeking inside a work app may also leave no window change at all.
+*   **Validate signals against ground truth:** Use manual screenshot labels as the ground truth for flow and stuck, and compare the background telemetry logs against them. Check chatbot opens against the same labels rather than treating them as labels. If the logs don't show a clear pattern before labelled stuck moments, the signals need adjustment.
 
 ## Phase 2: The State Detector
 **The Intuition:** Now that we have data, we need a fast, cheap way to read it continuously. We don't want to run a heavy AI model every second. Instead, we build a lightweight system that looks at the recent past and gives a simple score from 0 (flow) to 1 (stuck).

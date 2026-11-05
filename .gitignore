@@ -7,3 +7,6 @@ __pycache__/
 # Real ActivityWatch exports: personal telemetry (window titles, URLs). Never commit.
 aw-buckets-export.json
 aw-*-export*.json
+
+# Third-party datasets brought in for reference: no license confirmed. Never commit.
+labelled-awt-data/
