@@ -30,6 +30,7 @@ STATE_MULT = {"flow": 1.0, "stuck": 1.0, "neutral": 1.0, "distracted": 0.0}
 # input alone cannot tell a Zoom call from an empty chair; the app in front has to.
 STRAY_NUDGE_P = 0.003
 BROWSERS = {"Google Chrome", "Safari"}
+RAPID_FLICK_MULT = 2.5      # rapid coding overshoots cmd-tab far more often than steady work
 
 
 def _flick_dur(rng: random.Random) -> float:
@@ -61,14 +62,14 @@ def _overlays(rng, nprng, st, level, old, k, a, b, win, mult, rec, flick_starts,
     """Candidate (start, end, window) replacements inside one focus interval."""
     ov: list[tuple[float, float, dict]] = []
     span = b - a
-    if win["app"] == C.LOCK_WIN["app"] or span < 6:
+    if win["app"] == C.LOCK_WIN["app"] or span < 5:
         return ov
 
     # --- cmd-tab style focus flicks, sometimes a multi-app cycle
-    if span >= 8 and mult > 0:
+    if span >= 5 and mult > 0:
         n = int(nprng.poisson(st.flick_per_min * level * mult / 60.0 * span))
         for _ in range(n):
-            s = rng.uniform(a + 1.5, max(a + 1.6, b - 2.5))
+            s = rng.uniform(a + 1.0, max(a + 1.1, b - 1.5))
             hops = rng.randint(2, 4) if rng.random() < st.cluster_p else 1
             t, seen = s, {win["app"]}
             for _h in range(hops):
@@ -161,6 +162,13 @@ def splice_all(focus, length, overlays, margin=0.0):
 
 def noise_focus(rec, rng, nprng, st, segs, level, length):
     starts = [s[0] for s in segs]
+    rapid = sorted(rec.rapid_spans)
+    rapid_starts = [r[0] for r in rapid]
+
+    def hopping(t):
+        i = bisect_right(rapid_starts, t) - 1
+        return i >= 0 and t < rapid[i][1]
+
     old = rec.focus
     new: list[tuple[float, dict]] = []
     flick_starts: list[float] = []
@@ -168,6 +176,8 @@ def noise_focus(rec, rng, nprng, st, segs, level, length):
         b = old[k + 1][0] if k + 1 < len(old) else length
         seg = _seg_at(starts, segs, (a + b) / 2)
         mult = STATE_MULT[seg[2]] * (0.1 if seg[3] == "meeting" else 1.0)   # rarely cmd-tab mid-call
+        if hopping((a + b) / 2):
+            mult *= RAPID_FLICK_MULT
         ov = _overlays(rng, nprng, st, level, old, k, a, b, win, mult, rec, flick_starts, seg[4])
         for t, w in splice_interval(a, b, win, ov, 0.4):
             if not new or new[-1][1] != w:

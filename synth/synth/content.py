@@ -46,6 +46,9 @@ NOISE_WINDOWS = [
     {"app": "‎WhatsApp", "title": "‎WhatsApp"},           # sensitive
 ]
 
+# Quick side trips while coding: same machine, nothing sensitive, nothing to do with the problem.
+SIDE_WINDOWS = [w for w in NOISE_WINDOWS if w["app"] and w["app"] not in SENSITIVE_APPS]
+
 SPINNER = ["⠋", "⠙", "⠹", "⠸"]                  # shell tool spinner frames (rare in real Terminal.app traces)
 
 LOCK_WIN = {"app": "loginwindow", "title": ""}

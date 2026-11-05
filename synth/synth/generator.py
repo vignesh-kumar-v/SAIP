@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
@@ -35,7 +35,7 @@ from .styles import UserStyle, sample_style
 BIN = 5.0             # seconds, matches aw-watcher-input
 AFK_TIMEOUT = 180.0   # seconds, aw-watcher-afk default
 STATES = ("flow", "stuck", "distracted", "neutral")
-GENERATOR_VERSION = "0.6"
+GENERATOR_VERSION = "0.7"
 HOST = "synthetic-macbook.local"
 
 # Same id pattern, type and client as the real watchers, so one loader reads real and synthetic exports.
@@ -98,6 +98,8 @@ class Recorder:
         self.pauses: list[tuple[float, float]] = []
         self.cmd_titles: list[tuple[float, float, dict]] = []
         self.sleeps: list[tuple[float, float]] = []   # lid closed: window, afk and web stop reporting
+        self.rapid_spans: list[tuple[float, float]] = []   # stretches of rapid hopping while coding
+        self.burst_on = False       # typing carries across windows: a burst doesn't end because focus moved
         self.hook_off = False       # remote session: no zsh/fs hook events
         self.no_titles = False      # terminal-only editing: window title never shows the command
 
@@ -119,8 +121,8 @@ def profile(s: UserStyle, mode: str, kind: str) -> dict:
     stuck = mode == "stuck"
     if kind == "editor":
         if stuck:
-            return P(r * s.stuck_type_mult, s.stuck_duty, s.stuck_burst, 0.4, s.mouse_p * 1.4, s.scroll_p * 0.8)
-        return P(r, s.flow_duty, s.burst_bins, 0.15, s.mouse_p * 0.8, s.scroll_p * 0.5)
+            return P(r * s.stuck_type_mult, s.stuck_duty, s.stuck_burst, 0.4, s.mouse_p * 1.1, s.scroll_p * 0.7, partial=0.3)
+        return P(r, s.flow_duty, s.burst_bins, 0.3, s.mouse_p * 0.55, s.scroll_p * 0.3, partial=0.2)
     if kind == "terminal":
         return P(r * (0.35 if stuck else 0.5), 0.15 if stuck else 0.25, 2, 0.05,
                  s.mouse_p * 0.3, s.scroll_p * 0.2)
@@ -128,8 +130,8 @@ def profile(s: UserStyle, mode: str, kind: str) -> dict:
         return P(0, 0, 1, 0.02, s.mouse_p * 0.25, s.scroll_p * 0.5)
     if kind == "browser":
         if stuck:
-            return P(r * 0.6, 0.12, 2, 0.8, s.mouse_p * 1.8, 0.7)
-        return P(r * 0.6, 0.10, 2, 0.5, s.mouse_p * 1.5, 0.5)
+            return P(r * 0.6, 0.2, 2, 0.8, s.mouse_p * 1.3, 0.6)
+        return P(r * 0.7, 0.3, 6, 0.5, s.mouse_p * 1.1, 0.4)    # searching and filtering take typing too
     if kind == "doc":                                         # writing surface
         if stuck:
             return P(r * s.stuck_type_mult * 0.9, s.stuck_duty * 0.9, s.stuck_burst, 0.3, s.mouse_p * 1.2, s.scroll_p)
@@ -162,6 +164,8 @@ def profile(s: UserStyle, mode: str, kind: str) -> dict:
         return P(max(r * 1.2, 11), 0.45, 5, 0.3, s.mouse_p, s.scroll_p, partial=0.15)  # a prompt or message, in full sentences
     if kind == "ai_read":                                     # reading an answer: some scrolling, the odd click
         return P(0, 0, 1, 0.25, s.mouse_p * 0.8, s.scroll_p * 0.8)
+    if kind == "glance":                                      # a few seconds in another app: Finder, Slack, a calendar
+        return P(r * 0.5, 0.3, 2, 0.6, s.mouse_p, s.scroll_p * 0.4)
     if kind == "agent_prompt":                                # a short instruction or an approval to Claude Code
         return P(r * 0.7, 0.55, 3, 0.12, s.mouse_p * 0.9, s.scroll_p * 0.4)
     if kind == "browse":
@@ -188,7 +192,7 @@ def fill(rec: Recorder, rng: random.Random, nprng: np.random.Generator,
     typing = rate > 0 and duty > 0
     leave = 1.0 / max(p["burst"], 1.0)
     join = 1.0 if duty >= 0.99 else min(1.0, leave * duty / (1.0 - duty)) if typing else 0.0
-    on = typing and rng.random() < duty
+    on = typing and (rec.burst_on or rng.random() < duty)
     for i in range(i0, i1):
         typed = False
         if on:
@@ -215,6 +219,7 @@ def fill(rec: Recorder, rng: random.Random, nprng: np.random.Generator,
             rec.sy[i] += int(min(3000, nprng.lognormal(math.log(40), 1.3)))
             if rng.random() < p["scroll_x_p"]:
                 rec.sx[i] += int(min(1500, nprng.lognormal(math.log(8), 1.6)))
+    rec.burst_on = on
 
 
 class Player:
@@ -291,7 +296,7 @@ def chat_len(rng):
 
 def open_chat(rec, pl, rng, seg, kind, chat_dur):
     cw = chat_home(rng, pl.style)
-    fresh = pl.win != cw                                      # already there: nothing was opened
+    fresh = not rec.focus or rec.focus[-1][1] != cw           # already there: nothing was opened
     iv = pl.run("chat", chat_dur * 0.4, cw)
     if iv:
         if fresh:
@@ -347,6 +352,11 @@ class CodeUI:
 
 def bwin(app, page):
     return C.browser_win(app, page["url"], page["title"])
+
+
+def visit_len(rng, median, sigma):
+    """How long a quick visit lasts: mostly seconds, sometimes longer."""
+    return min(max(rng.lognormvariate(math.log(median), sigma), 2.5), 120.0)
 
 
 def edit_stint(rec, pl, rng, st, pj, ui, ctx, dwell):
@@ -407,6 +417,8 @@ def emit_flow(seg, rec, rng, nprng, st, ctx):
 
 
 def emit_flow_coding(seg, rec, rng, nprng, st, ctx):
+    """Coding has two gears, seen in real sessions: long deep stretches in the editor, and rapid
+    hopping between editor, browser and terminal. Both are flow: busy switching isn't being stuck."""
     pl = Player(rec, rng, nprng, st, "flow", seg.start, seg.end)
     pj = ctx.project
     proj = pj.name
@@ -419,56 +431,109 @@ def emit_flow_coding(seg, rec, rng, nprng, st, ctx):
     cmd_kinds = list(W.STACKS[pj.stack]["cmds"])
     tdd = None                                               # red-green loop: same failure repeats while working
     task = W.agent_task(rng)
-    while not pl.done:
+
+    def chat_due():
+        nonlocal chat_at
         if chat_at is not None and pl.t >= chat_at:
             help_open(rec, pl, rng, seg, "incidental", rng.uniform(30, 90), st, ui.editor(ctx.file))
             chat_at = None
-            continue
-        dwell = min(max(rng.expovariate(st.flow_switch_per_min / 60.0), 20.0), 600.0)
-        edit_stint(rec, pl, rng, st, pj, ui, ctx, dwell)
-        if pl.done:
-            break
-        if rng.random() < st.ai_glance_p:
-            open_chat(rec, pl, rng, seg, "incidental", chat_len(rng))
+            return True
+        return False
+
+    def run_command(lo, hi):
+        nonlocal tdd
+        iv = pl.run("terminal", rng.uniform(lo, hi), ui.term(ctx.file))
+        if not iv:
+            return
+        mod = ctx.file.module or None
+        if rng.random() < 0.12:
+            add_commit(rec, rng, iv, proj)
+        elif tdd and tdd["left"] > 0:
+            tdd["left"] -= 1
+            add_command(rec, rng, iv, tdd["kind"], 1, tdd["sig"], tdd["etype"],
+                        W.cmd_string(rng, pj, tdd["kind"], mod), proj)
+        elif rng.random() < st.err_flow:
+            etype, kind, sig, msg, lib = W.random_error(rng, pj)
+            if sig == ctx.last_sig:
+                add_command(rec, rng, iv, kind, 0, None, None, W.cmd_string(rng, pj, kind, mod), proj)
+            else:
+                add_command(rec, rng, iv, kind, 1, sig, etype, W.cmd_string(rng, pj, kind, mod), proj)
+                ctx.last_sig = sig
+                if rng.random() < st.tdd_p:
+                    tdd = dict(etype=etype, kind=kind, sig=sig, left=rng.randint(1, 3))
+                elif rng.random() < 0.55 and not pl.done:
+                    # quick search for the error, fixed in a minute: the same pages a stuck user opens
+                    pg = rng.choice(W.error_pages(rng, pj, etype, msg, lib, n_so=(1, 2)))
+                    pl.run("browser", rng.uniform(10, 50), bwin(app, pg))
+        else:
+            kind = rng.choice(cmd_kinds)
+            add_command(rec, rng, iv, kind, 0, None, None, W.cmd_string(rng, pj, kind, mod), proj)
+
+    def deep(until):
+        nonlocal task
+        while not pl.done and pl.t < until:
+            if chat_due():
+                continue
+            dwell = min(max(rng.expovariate(st.flow_switch_per_min / 60.0), 20.0), 600.0)
+            edit_stint(rec, pl, rng, st, pj, ui, ctx, dwell)
             if pl.done:
                 break
-        roll = rng.random()
-        if roll < 0.62 and not ui.remote and rng.random() < st.agent_flow_p:
-            # drive Claude Code: type an instruction, watch it work, approve a step
-            pl.run("agent_prompt", rng.uniform(8, 30), {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)})
-            agent_stint(rec, pl, rng, proj, task, rng.uniform(20, 120))
-            if rng.random() < 0.3:
-                task = W.agent_task(rng)
-        elif roll < 0.62:
-            iv = pl.run("terminal", rng.uniform(8, 40), ui.term(ctx.file))
+            if rng.random() < st.ai_glance_p:
+                open_chat(rec, pl, rng, seg, "incidental", chat_len(rng))
+                if pl.done:
+                    break
+            roll = rng.random()
+            if roll < 0.62 and not ui.remote and rng.random() < st.agent_flow_p:
+                # drive Claude Code: type an instruction, watch it work, approve a step
+                pl.run("agent_prompt", rng.uniform(8, 30), {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)})
+                agent_stint(rec, pl, rng, proj, task, rng.uniform(20, 120))
+                if rng.random() < 0.3:
+                    task = W.agent_task(rng)
+            elif roll < 0.62:
+                run_command(8, 40)
+            elif roll < 0.90:
+                browse_stint(pl, rng, app, W.lookup_page(rng, pj), lambda: W.lookup_page(rng, pj), 10, 60)
+            if rng.random() < 0.35:
+                ctx.file = W.next_file(rng, pj, ctx.file)     # module <-> test, neighbours
+
+    def rapid(until):
+        """Write a line, check the docs, run it, back again: short visits, and new files and pages keep coming."""
+        start = pl.t
+        files = [ctx.file]
+        for _ in range(rng.randint(1, 4)):
+            files.append(W.next_file(rng, pj, files[-1]))
+        pages = [W.lookup_page(rng, pj) for _ in range(rng.randint(1, 3))]
+        while not pl.done and pl.t < until:
+            if chat_due():
+                continue
+            iv = pl.run(ui.ekind, visit_len(rng, 8.0, 0.9), ui.editor(ctx.file))
             if iv:
-                mod = ctx.file.module or None
-                if rng.random() < 0.12:
-                    add_commit(rec, rng, iv, proj)
-                elif tdd and tdd["left"] > 0:
-                    tdd["left"] -= 1
-                    add_command(rec, rng, iv, tdd["kind"], 1, tdd["sig"], tdd["etype"],
-                                W.cmd_string(rng, pj, tdd["kind"], mod), proj)
-                elif rng.random() < st.err_flow:
-                    etype, kind, sig, msg, lib = W.random_error(rng, pj)
-                    if sig == ctx.last_sig:
-                        add_command(rec, rng, iv, kind, 0, None, None, W.cmd_string(rng, pj, kind, mod), proj)
-                    else:
-                        add_command(rec, rng, iv, kind, 1, sig, etype, W.cmd_string(rng, pj, kind, mod), proj)
-                        ctx.last_sig = sig
-                        if rng.random() < st.tdd_p:
-                            tdd = dict(etype=etype, kind=kind, sig=sig, left=rng.randint(1, 3))
-                        elif rng.random() < 0.35 and not pl.done:
-                            # quick search for the error, fixed in a minute: the same pages a stuck user opens
-                            pg = rng.choice(W.error_pages(rng, pj, etype, msg, lib, n_so=(1, 2)))
-                            pl.run("browser", rng.uniform(10, 50), bwin(app, pg))
-                else:
-                    kind = rng.choice(cmd_kinds)
-                    add_command(rec, rng, iv, kind, 0, None, None, W.cmd_string(rng, pj, kind, mod), proj)
-        elif roll < 0.90:
-            browse_stint(pl, rng, app, W.lookup_page(rng, pj), lambda: W.lookup_page(rng, pj), 10, 60)
-        if rng.random() < 0.35:
-            ctx.file = W.next_file(rng, pj, ctx.file)         # module <-> test, neighbours
+                add_saves(rec, rng, st, iv[0], iv[1], proj, ctx.file)
+            if pl.done:
+                break
+            r = rng.random()
+            if r < 0.42:
+                if rng.random() < 0.35:
+                    pages.append(W.lookup_page(rng, pj))
+                pl.run("browser", visit_len(rng, 6.5, 0.8), bwin(app, rng.choice(pages[-5:])))
+                while not pl.done and rng.random() < 0.45:    # one page leads to another, in the same browser
+                    pages.append(W.lookup_page(rng, pj))
+                    pl.run("browser", visit_len(rng, 6.5, 0.8), bwin(app, pages[-1]))
+            elif r < 0.50:
+                run_command(4, 25)
+            elif r < 0.60:
+                pl.run("glance", visit_len(rng, 4.3, 0.7), rng.choice(C.SIDE_WINDOWS))
+            elif rng.random() < st.ai_glance_p:
+                open_chat(rec, pl, rng, seg, "incidental", chat_len(rng))
+            if rng.random() < 0.7:                            # move on to another file, sometimes one not open yet
+                if rng.random() < 0.3:
+                    files.append(W.next_file(rng, pj, files[-1]))
+                ctx.file = rng.choice(files[-5:])
+        rec.rapid_spans.append((start, pl.t))
+
+    while not pl.done:
+        until = pl.t + rng.lognormvariate(math.log(10.0), 0.6) * 60.0
+        (rapid if rng.random() < st.rapid_p else deep)(until)
     for _ in range(int(nprng.poisson(dur / 60.0 / 15.0))):
         a = seg.start + rng.uniform(0.1, 0.9) * dur
         rec.pauses.append((a, min(seg.end, a + rng.uniform(8, 40))))
@@ -1107,7 +1172,14 @@ def generate_day(seed: int, day: date, tz_offset_h: float = -7.0,
     rng = random.Random(seed)
     nprng = np.random.default_rng(seed)
     who = rng if user is None else random.Random(f"user-{user}")
-    st = sample_style(who)
+    person = sample_style(who)
+    # One person works differently from day to day: the same export shape showed a day of directing
+    # an agent and a day of hand-coding from the same laptop.
+    hand_coding_day = rng.random() < 0.4
+    ai_scale = 0.15 if hand_coding_day else rng.uniform(0.8, 1.4)
+    st = replace(person, rapid_p=min(0.95, person.rapid_p * rng.uniform(0.4, 1.4)),
+                 ai_work_p=min(0.8, person.ai_work_p * ai_scale),
+                 ai_glance_p=min(0.5, person.ai_glance_p * ai_scale))
     length = (end_hour - start_hour) * 3600.0
     t0 = (datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
           + timedelta(hours=start_hour - tz_offset_h))
@@ -1158,5 +1230,5 @@ def generate_day(seed: int, day: date, tz_offset_h: float = -7.0,
                 for h in sorted(rec.help, key=lambda h: h["t"])]
     return dict(
         seed=seed, user=user, date=day.isoformat(), tz_offset_h=tz_offset_h, start_utc=t0.isoformat(),
-        length_s=length, style=st.as_dict(), noise=noise, events=events, labels=labels,
+        length_s=length, style=person.as_dict(), noise=noise, events=events, labels=labels,
         help_requests=help_req, generator_version=GENERATOR_VERSION)

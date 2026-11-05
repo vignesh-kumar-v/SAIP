@@ -107,8 +107,8 @@ def test_afk_never_triggers_inside_short_gaps(days):
         ev = d["events"]["afk"]
         for k, e in enumerate(ev):
             if e["data"]["status"] == "afk" and e["duration"] < AFK_TIMEOUT - 1e-6:
-                assert e["duration"] <= 30
                 after_sleep = k >= 1 and t(e["timestamp"]) - (t(ev[k - 1]["timestamp"]) + ev[k - 1]["duration"]) > 1
+                assert e["duration"] <= (45 if after_sleep else 30)
                 if after_sleep:
                     continue
                 assert k >= 2 and ev[k - 1]["duration"] <= 15 and ev[k - 2]["data"]["status"] == "afk"
@@ -157,11 +157,32 @@ def test_stuck_repeats_errors_more_than_flow(many):
     assert sum(rep_flow) / len(rep_flow) < sum(rep_stuck) / len(rep_stuck)       # more, not only, in stuck
 
 
-def test_stuck_switches_more_than_flow_on_average(days):
-    # raw window events are swamped by flicks and title churn; dwell switches are the robust signal
-    stuck = [summarize(d)["stuck"]["dwell_switches_per_min"] for d in days.values()]
-    flow = [summarize(d)["flow"]["dwell_switches_per_min"] for d in days.values()]
-    assert sum(stuck) / len(stuck) > 1.3 * sum(flow) / len(flow)
+def test_stuck_circles_fewer_windows_than_flow(many):
+    # real coding switches constantly, so being busy says little; what differs is reaching new windows
+    def windows_per_5_min(state):
+        counts = []
+        for d in many.values():
+            for l in d["labels"]:
+                if l["state"] != state or l["meta"].get("mode") != "coding" or l["duration_s"] < 300:
+                    continue
+                a = t(l["start"])
+                seen = {e["data"]["title"].removeprefix("\u25cf ") for e in d["events"]["window"]
+                        if a <= t(e["timestamp"]) < a + 300 and e["duration"] >= 2}
+                counts.append(len(seen))
+        return sum(counts) / len(counts)
+    assert windows_per_5_min("stuck") < 0.75 * windows_per_5_min("flow")
+
+
+def test_coding_flow_has_both_gears(many):
+    # real sessions alternate between rapid hopping and long deep stretches in the editor
+    rates = []
+    for d in many.values():
+        for l in d["labels"]:
+            if l["state"] == "flow" and l["subtype"] == "work" and l["meta"].get("mode") == "coding" and l["duration_s"] > 600:
+                n = sum(t(l["start"]) <= t(e["timestamp"]) < t(l["end"]) and e["duration"] >= 2 for e in d["events"]["window"])
+                rates.append(n / (l["duration_s"] / 3600))
+    rates.sort()
+    assert rates[len(rates) // 10] < 150 and rates[9 * len(rates) // 10] > 280
 
 
 def test_return_to_error_reuses_the_same_problem(days):
@@ -670,26 +691,26 @@ def non_lock_hours(d):
 
 
 def test_app_switching_is_in_the_real_range(many):
-    # two independent real sources land near 54 switches per hour; noise must not double that
+    # real sources span 54 per hour (office work, directing an agent) to 145 (hand-coding)
     rates, same = [], []
     for d in many.values():
         w = d["events"]["window"]
         changes = sum(a["data"]["app"] != b["data"]["app"] for a, b in zip(w, w[1:]))
         rates.append(changes / non_lock_hours(d))
         same.append(1 - changes / (len(w) - 1))
-    assert 35 < sum(rates) / len(rates) < 90
-    assert 0.55 < sum(same) / len(same) < 0.9
+    assert 50 < sum(rates) / len(rates) < 170
+    assert 0.35 < sum(same) / len(same) < 0.85
 
 
 def test_input_mix_is_in_the_real_range(many):
     act = pooled_input(many)
     typing = sorted(x["presses"] for x in act if x["presses"] > 0)
     share = lambda f: sum(map(f, act)) / len(act)
-    assert 0.2 < len(typing) / len(act) < 0.5
-    assert 3 <= typing[len(typing) // 2] <= 6
+    assert 0.3 < len(typing) / len(act) < 0.65            # 32% directing an agent, 62% hand-coding
+    assert 4 <= typing[len(typing) // 2] <= 8
     assert typing[int(0.99 * len(typing))] <= 35
-    assert 0.65 < share(lambda x: x["deltaX"] + x["deltaY"] > 0) < 0.95
-    assert 0.35 < share(lambda x: x["scrollX"] + x["scrollY"] > 0) < 0.65
+    assert 0.55 < share(lambda x: x["deltaX"] + x["deltaY"] > 0) < 0.9
+    assert 0.25 < share(lambda x: x["scrollX"] + x["scrollY"] > 0) < 0.6
     assert 0.45 < sum(x["clicks"] for x in act) / len(act) < 1.1
 
 

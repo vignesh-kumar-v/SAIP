@@ -51,6 +51,7 @@ class UserStyle:
     ai_work_p: float            # chance a flow block is spent working with an AI (brainstorming, directing an agent)
     ai_glance_p: float          # chance of a quick look at the AI tool between stints of ordinary work
     ai_home: int                # the AI tool this person normally reaches for
+    rapid_p: float              # chance a stretch of coding is rapid hopping rather than long deep editing
     flow_mean_min: float
     stuck_mean_min: float
     neutral_mean_min: float
@@ -73,21 +74,21 @@ def sample_style(rng: random.Random) -> UserStyle:
     ai_work_p = (0.0 if tier < 0.25 else u(0.02, 0.10) if tier < 0.60
                  else u(0.10, 0.30) if tier < 0.85 else u(0.40, 0.70))
     return UserStyle(
-        typing_rate=u(5, 17),
-        flow_duty=u(0.2, 0.6),
-        burst_bins=u(3, 9),
+        typing_rate=u(7, 18),
+        flow_duty=u(0.35, 0.75),
+        burst_bins=u(5, 14),
         mouse_p=u(0.65, 0.95) if trackpad else u(0.20, 0.50),
         mouse_scale=u(350, 800),
         scroll_p=u(0.45, 0.75) if trackpad else u(0.12, 0.35),
-        flow_switch_per_min=u(0.35, 1.0),
-        stuck_pace=u(0.45, 1.5),
+        flow_switch_per_min=u(0.15, 0.6),
+        stuck_pace=u(0.3, 1.3),
         err_flow=u(0.06, 0.22),
         save_every_s=u(35, 110),
         help_p=u(0.10, 0.28),
         resolved_p=u(0.30, 0.50),
         return_p=u(0.4, 0.7),
         incidental_chat_p=u(0.08, 0.22),
-        flick_per_min=u(0.05, 0.35),
+        flick_per_min=u(0.05, 0.25),
         cluster_p=u(0.15, 0.40),
         tab_peek_per_min=u(0.2, 0.9),
         jitter_p=u(0.01, 0.04),
@@ -104,13 +105,14 @@ def sample_style(rng: random.Random) -> UserStyle:
         agent_p=u(0.0, 0.8),
         vim_p=0.8 if rng.random() < 0.25 else 0.05,
         trackpad=trackpad,
-        type_mouse_p=u(0.45, 0.75) if trackpad else u(0.10, 0.30),
+        type_mouse_p=u(0.30, 0.60) if trackpad else u(0.08, 0.25),
         scroll_x_p=u(0.7, 0.95) if trackpad else u(0.0, 0.1),
         agent_flow_p=0.6 if rng.random() < 0.4 else u(0.0, 0.2),
         click_scale=u(1.2, 3.0) if trackpad else u(0.9, 2.2),
         ai_work_p=ai_work_p,
         ai_glance_p=min(0.5, ai_work_p * 0.7 + u(0.0, 0.03)),
         ai_home=rng.randrange(1000),
+        rapid_p=u(0.15, 0.85),
         flow_mean_min=u(14, 26),
         stuck_mean_min=u(5, 10),
         neutral_mean_min=u(4, 9),
