@@ -59,7 +59,11 @@ def test_streams_tile_the_day_without_overlap(days, bucket):
         zero = 0
         for e in ev:
             start = t(e["timestamp"]) - t(d["start_utc"])
-            assert start == pytest.approx(end, abs=0.01)
+            if start - end > 0.01:                     # only a sleeping laptop stops the watchers mid-day
+                gap = t(d["start_utc"]) + end + 1
+                assert any(l["state"] == "distracted" and t(l["start"]) <= gap < t(l["end"]) for l in d["labels"])
+            else:
+                assert start == pytest.approx(end, abs=0.01)
             assert e["duration"] >= 0
             zero += e["duration"] == 0
             end = start + e["duration"]
@@ -74,7 +78,7 @@ def test_input_is_counts_only(days):
             assert set(e["data"]) == INPUT_KEYS
             # the real watcher stores magnitudes: no negative deltas or scrolls
             assert all(v >= 0 for v in e["data"].values())
-            assert e["data"]["presses"] <= 26
+            assert e["data"]["presses"] <= 2 * 65              # the watcher has no cap, but fingers do
             nonzero = any(e["data"].values())
             if nonzero:
                 assert 3.5 <= e["duration"] <= 2 * BIN + 0.1   # ~5 s, early polls and missed polls happen
@@ -97,12 +101,16 @@ def test_terminal_and_fs_hold_no_free_text(days):
 
 def test_afk_never_triggers_inside_short_gaps(days):
     # afk needs the full timeout of no input; the only shorter afk events are wake-up flaps that
-    # directly follow a short not-afk blip inside a long absence (seen in real traces)
+    # directly follow a short not-afk blip inside a long absence (seen in real traces), or the moment
+    # after waking from sleep, where the away period is cut in two
     for d in days.values():
         ev = d["events"]["afk"]
         for k, e in enumerate(ev):
             if e["data"]["status"] == "afk" and e["duration"] < AFK_TIMEOUT - 1e-6:
                 assert e["duration"] <= 30
+                after_sleep = k >= 1 and t(e["timestamp"]) - (t(ev[k - 1]["timestamp"]) + ev[k - 1]["duration"]) > 1
+                if after_sleep:
+                    continue
                 assert k >= 2 and ev[k - 1]["duration"] <= 15 and ev[k - 2]["data"]["status"] == "afk"
 
 
@@ -110,10 +118,13 @@ def test_no_input_during_afk(days):
     for d in days.values():
         afk = [(t(e["timestamp"]), t(e["timestamp"]) + e["duration"])
                for e in d["events"]["afk"] if e["data"]["status"] == "afk"]
+        # a stray nudge on a locked screen doesn't end AFK; anywhere else, input does
+        locked = [(t(e["timestamp"]), t(e["timestamp"]) + e["duration"])
+                  for e in d["events"]["window"] if e["data"]["app"] == "loginwindow"]
         for e in d["events"]["input"]:
             if any(e["data"].values()):
                 mid = t(e["timestamp"]) + e["duration"] / 2
-                assert not any(a < mid < b for a, b in afk)
+                assert any(a < mid < b for a, b in locked) or not any(a < mid < b for a, b in afk)
 
 
 def test_help_requests_match_windows(days):
@@ -124,7 +135,7 @@ def test_help_requests_match_windows(days):
         starts = {e["timestamp"] for e in d["events"]["window"]}
         win = [(t(e["timestamp"]), t(e["timestamp"]) + e["duration"], e["data"]) for e in d["events"]["window"]]
         for h in d["help_requests"]:
-            assert h["kind"] in {"stuck_help", "incidental", "stuck_help_inline", "incidental_inline"}
+            assert h["kind"] in {"stuck_help", "incidental", "ai_work", "stuck_help_inline", "incidental_inline"}
             if h["kind"].endswith("_inline"):
                 # help asked inside the work app: no chat window exists, the work window just stays in front
                 cover = [w for a, b, w in win if a <= t(h["timestamp"]) + 0.002]   # last window started by then
@@ -193,8 +204,8 @@ def test_noise_adds_short_window_events(days):
     clean = generate_day(1, DAY, noise=0)
     # without noise, the only short events left are terminal command titles and Claude Code spinner frames
     assert all(e["data"]["app"] == "Terminal" for e in clean["events"]["window"] if e["duration"] < 2)
-    # real traces: ~30% of window events are short during mixed work, ~60% on heavy Claude Code days
-    assert all(0.15 < short_share(d) < 0.9 for d in days.values())
+    # real traces: ~12% of window events are short without AI tools, ~60% on heavy Claude Code days
+    assert all(0.05 < short_share(d) < 0.9 for d in days.values())
     cleans = {s: generate_day(s, DAY, noise=0) for s in days}
     # agent-spinner days are already full of 1 s title frames, so compare volume per seed, share on average
     assert all(len(d["events"]["window"]) > len(cleans[s]["events"]["window"]) for s, d in days.items())
@@ -260,10 +271,10 @@ def test_content_is_rich(days):
         assert len(urls) > 25
 
 
-def test_content_varies_across_seeds(days):
+def test_content_varies_across_seeds(days, many):
     sets = [titles(d) for d in days.values()]
     assert all(a != b for i, a in enumerate(sets) for b in sets[i + 1:])
-    assert len({e["data"]["error_sig"] for d in days.values() for e in d["events"]["terminal"]
+    assert len({e["data"]["error_sig"] for d in many.values() for e in d["events"]["terminal"]
                 if e["data"]["error_sig"]}) > 12
 
 
@@ -406,7 +417,7 @@ def test_chatbot_is_a_weak_label(many):
     kinds = collections.Counter(h["kind"] for d in many.values() for h in d["help_requests"])
     stuck = [l for d in many.values() for l in d["labels"] if l["state"] == "stuck"]
     help_rate = sum(l["outcome"] == "help" for l in stuck) / len(stuck)
-    assert kinds["incidental"] / sum(kinds.values()) > 0.3     # many chatbot opens are not stuck
+    assert (kinds["incidental"] + kinds["ai_work"]) / sum(kinds.values()) > 0.5   # most chatbot opens are not stuck
     assert help_rate < 0.35
 
 
@@ -490,7 +501,7 @@ def test_remote_sessions_are_invisible_to_local_hooks(clean):
 
 def test_ai_help_inside_the_work_app_leaves_no_chat_window(clean):
     inline = [(d, h) for d in clean.values() for h in d["help_requests"] if h["kind"].endswith("_inline")]
-    windowed = [h for d in clean.values() for h in d["help_requests"] if not h["kind"].endswith("_inline")]
+    windowed = [h for d in clean.values() for h in d["help_requests"] if h["kind"] == "stuck_help"]
     assert len(inline) >= 8 and len(windowed) >= 8
     assert 0.15 < len(inline) / (len(inline) + len(windowed)) < 0.85
     for d, h in inline:
@@ -564,9 +575,11 @@ def test_categories_for_real_world_apps():
 
 def test_writer_roundtrip(tmp_path, days):
     out = write_day(days[1], tmp_path / "d")
-    for name in ["window", "afk", "input", "web", "terminal", "fs", "labels"]:
+    for name in ["window", "afk", "input", "labels"]:
         rows = [json.loads(line) for line in (out / f"{name}.jsonl").read_text().splitlines()]
         assert rows
+    for name in ["web", "terminal", "fs"]:               # may be empty: a Safari user, or a day of writing
+        assert (out / f"{name}.jsonl").exists()
     assert (out / "help_requests.jsonl").exists()        # may be empty: some days nobody opens a chatbot
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["seed"] == 1 and "Synthetic" in manifest["note"]
@@ -576,6 +589,8 @@ def test_writer_roundtrip(tmp_path, days):
     assert set(export["buckets"]) == {f"aw-watcher-{k}_{HOST}" for k in names}
     types = {b["type"] for b in export["buckets"].values()}
     assert {"currentwindow", "afkstatus", "os.hid.input", "web.tab.current"} <= types
+    window = export["buckets"][f"aw-watcher-window_{HOST}"]["events"]
+    assert t(window[0]["timestamp"]) > t(window[-1]["timestamp"])   # newest first, like a real export
 
 
 # ------------------------------------------------------------------ realism vs a real export
@@ -613,14 +628,23 @@ def test_no_shell_commands_inside_vim_or_agent_tabs():
                 assert not any(a <= x < b for a, b in spans)
 
 
-def test_web_bucket_mirrors_chrome_tabs(days):
-    for d in days.values():
-        chrome = [e for e in d["events"]["window"] if e["data"]["app"] == "Google Chrome" and e["data"].get("url")]
+def test_web_bucket_reports_chrome_tabs_but_not_only_while_in_front(many):
+    web_s = front_s = 0.0
+    for d in many.values():
+        chrome = [(t(e["timestamp"]), t(e["timestamp"]) + e["duration"], e["data"]) for e in d["events"]["window"]
+                  if e["data"]["app"] == "Google Chrome" and e["data"].get("url")]
+        tabs = {(w["url"], w["title"]) for _, _, w in chrome}
         web = d["events"]["web"]
-        assert len(web) == len(chrome)
+        for a, b in zip(web, web[1:]):
+            assert t(a["timestamp"]) + a["duration"] <= t(b["timestamp"]) + 0.01
         for e in web:
             assert set(e["data"]) == {"url", "title", "audible", "incognito", "tabCount"}
             assert 1 <= e["data"]["tabCount"] <= 40
+            assert (e["data"]["url"], e["data"]["title"]) in tabs
+            s, f = t(e["timestamp"]), t(e["timestamp"]) + e["duration"]
+            web_s += e["duration"]
+            front_s += sum(max(0.0, min(f, y) - max(s, x)) for x, y, _ in chrome)
+    assert front_s / web_s < 0.8                         # real traces: 5-18%, the tab keeps counting in the background
 
 
 def test_error_pages_are_not_exclusive_to_stuck(many):
@@ -633,3 +657,133 @@ def test_error_pages_are_not_exclusive_to_stuck(many):
                 x = t(e["timestamp"])
                 where[next(s for a, b, s in segs if a <= x < b)] += 1
     assert where["stuck"] > 0 and where["flow"] / (where["stuck"] + where["flow"]) > 0.15
+
+
+# ------------------------------------------------------------------ how people actually behave
+def pooled_input(many):
+    return [e["data"] for d in many.values() for e in d["events"]["input"]
+            if any(e["data"].values()) and e["duration"] <= 11]
+
+
+def non_lock_hours(d):
+    return sum(e["duration"] for e in d["events"]["window"] if e["data"]["app"] != "loginwindow") / 3600
+
+
+def test_app_switching_is_in_the_real_range(many):
+    # two independent real sources land near 54 switches per hour; noise must not double that
+    rates, same = [], []
+    for d in many.values():
+        w = d["events"]["window"]
+        changes = sum(a["data"]["app"] != b["data"]["app"] for a, b in zip(w, w[1:]))
+        rates.append(changes / non_lock_hours(d))
+        same.append(1 - changes / (len(w) - 1))
+    assert 35 < sum(rates) / len(rates) < 90
+    assert 0.55 < sum(same) / len(same) < 0.9
+
+
+def test_input_mix_is_in_the_real_range(many):
+    act = pooled_input(many)
+    typing = sorted(x["presses"] for x in act if x["presses"] > 0)
+    share = lambda f: sum(map(f, act)) / len(act)
+    assert 0.2 < len(typing) / len(act) < 0.5
+    assert 3 <= typing[len(typing) // 2] <= 6
+    assert typing[int(0.99 * len(typing))] <= 35
+    assert 0.65 < share(lambda x: x["deltaX"] + x["deltaY"] > 0) < 0.95
+    assert 0.35 < share(lambda x: x["scrollX"] + x["scrollY"] > 0) < 0.65
+    assert 0.45 < sum(x["clicks"] for x in act) / len(act) < 1.1
+
+
+def test_no_pile_up_at_a_fake_keypress_limit(many):
+    typing = [x["presses"] for x in pooled_input(many) if x["presses"] > 0]
+    assert sum(p == 26 for p in typing) / len(typing) < 0.01
+    assert max(typing) > 26
+
+
+def test_ai_use_varies_from_none_to_most_of_the_day(many):
+    shares = [sum(l["duration_s"] for l in d["labels"] if l["subtype"] == "ai_collab")
+              / sum(l["duration_s"] for l in d["labels"]) for d in many.values()]
+    assert min(shares) == 0 and max(shares) > 0.25
+
+
+def test_working_with_ai_is_flow_and_not_a_stuck_signal(many):
+    # opening a chatbot does not mean someone needs help: most opens happen while things are going fine
+    states = collections.Counter()
+    for d in many.values():
+        for h in d["help_requests"]:
+            states[d["labels"][h["segment"]]["state"]] += 1
+    assert states["flow"] > 2 * states["stuck"]
+    collab = [l for d in many.values() for l in d["labels"] if l["subtype"] == "ai_collab"]
+    assert collab and all(l["state"] == "flow" and l["meta"]["variant"] == "ai_collab" for l in collab)
+
+
+def test_people_also_get_stuck_while_using_ai(many):
+    # otherwise heavy AI use would become a perfect sign of flow
+    loops = [l for d in many.values() for l in d["labels"] if l["state"] == "stuck" and l["meta"].get("ai_loop")]
+    assert len(loops) >= 5
+    assert all(l["meta"]["mode"] == "coding" and not l["meta"]["remote"] for l in loops)
+
+
+def test_ai_visits_are_mostly_short_with_some_long_conversations(many):
+    runs = []
+    for d in many.values():
+        cur = 0.0
+        for e in d["events"]["window"]:
+            if category(e["data"]) == "chat":
+                cur += e["duration"]
+            elif e["duration"] >= 2 and cur:
+                runs.append(cur)
+                cur = 0.0
+    runs.sort()
+    assert runs[len(runs) // 2] < 90 and runs[-1] > 600
+
+
+def test_people_stick_to_one_ai_tool(many):
+    apps = collections.Counter()
+    for d in many.values():
+        counts = collections.Counter(h["app"] for h in d["help_requests"] if not h["kind"].endswith("_inline"))
+        if sum(counts.values()) >= 10:
+            apps["top"] += counts.most_common(1)[0][1]
+            apps["all"] += sum(counts.values())
+    assert apps["top"] / apps["all"] > 0.6
+
+
+def test_locking_the_screen_counts_as_away_quickly(many):
+    delays = []
+    for d in many.values():
+        notafk = [(t(e["timestamp"]), t(e["timestamp"]) + e["duration"])
+                  for e in d["events"]["afk"] if e["data"]["status"] == "not-afk"]
+        for e in d["events"]["window"]:
+            if e["data"]["app"] == "loginwindow" and e["duration"] >= 5:
+                s, f = t(e["timestamp"]), t(e["timestamp"]) + e["duration"]
+                delays.append(sum(max(0.0, min(f, y) - max(s, x)) for x, y in notafk))
+    assert delays and sorted(delays)[len(delays) // 2] <= 5.5
+
+
+def test_laptop_sleep_leaves_a_gap_but_input_keeps_reporting_zero(many):
+    found = 0
+    for d in many.values():
+        w = d["events"]["window"]
+        for a, b in zip(w, w[1:]):
+            start = t(a["timestamp"]) + a["duration"]
+            if t(b["timestamp"]) - start > 60:
+                found += 1
+                for e in d["events"]["input"]:
+                    if start + 5 < t(e["timestamp"]) < t(b["timestamp"]) - 5:
+                        assert not any(e["data"].values())
+    assert found >= 3
+    for d in many.values():
+        ev = d["events"]["input"]
+        for a, b in zip(ev, ev[1:]):
+            assert t(b["timestamp"]) - (t(a["timestamp"]) + a["duration"]) < 0.02
+
+
+def test_user_keeps_one_person_across_days():
+    a = generate_day(1, DAY, user=7)
+    b = generate_day(2, date(2026, 11, 5), user=7)
+    other = generate_day(1, DAY, user=8)
+    assert a["style"] == b["style"] and a["style"] != other["style"]
+    assert digest(a) != digest(b)                        # same person, different day
+    assert digest(a) == digest(generate_day(1, DAY, user=7))
+    projects = lambda d: {l["meta"]["project"] for l in d["labels"] if l["meta"].get("project")}
+    union = {x for s in range(1, 9) for x in projects(generate_day(s, DAY, user=7))}
+    assert 1 <= len(union) <= 2

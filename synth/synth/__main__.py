@@ -18,11 +18,13 @@ def main() -> None:
     ap.add_argument("--end-hour", type=float, default=17.5)
     ap.add_argument("--noise", type=float, default=1.0,
                     help="background noise level: 0 clean, 1 default, 2 heavy")
+    ap.add_argument("--user", type=int, default=None,
+                    help="keep one person across days: same style, projects and documents; --seed still varies the day")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     result = generate_day(args.seed, args.date, args.tz_offset, args.start_hour, args.end_hour,
-                          args.noise)
+                          args.noise, args.user)
     out = write_day(result, args.out or f"data/synthetic/day_seed{args.seed}")
     print(f"wrote {out}")
     print(format_table(summarize(result)))

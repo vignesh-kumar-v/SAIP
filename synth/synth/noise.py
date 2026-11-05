@@ -33,8 +33,11 @@ BROWSERS = {"Google Chrome", "Safari"}
 
 
 def _flick_dur(rng: random.Random) -> float:
-    if rng.random() < 0.7:
-        return 0.96 + rng.random() * 0.1                    # one watcher poll
+    r = rng.random()
+    if r < 0.1:
+        return rng.uniform(0.5, 0.9)                        # focus change caught between polls
+    if r < 0.75:
+        return 0.955 + rng.random() * 0.015                 # one watcher poll
     return min(0.96 + rng.lognormvariate(math.log(1.5), 0.8), 9.0)
 
 
@@ -109,7 +112,7 @@ def _overlays(rng, nprng, st, level, old, k, a, b, win, mult, rec, flick_starts,
         stop = min(b - 0.6, t + rng.uniform(10, 45))
         i = rng.randrange(len(C.SPINNER))
         while t < stop:
-            d = 0.96 + rng.random() * 0.12
+            d = 0.955 + rng.random() * 0.02
             w = dict(win)
             w["title"] = f"{C.SPINNER[i % len(C.SPINNER)]} {win['title']}"
             ov.append((t, min(t + d, stop), w))

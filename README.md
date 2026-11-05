@@ -24,6 +24,9 @@ pip install -r requirements.txt
 # one synthetic day (run from synth/, the package root)
 cd synth && python -m synth --seed 1 --out ../data/synthetic/day_seed1
 
+# the shared dataset: 20 people, 10 working days each, in data/synthetic (from the repo root)
+python synth/generate_dataset.py
+
 # tests (from the repo root)
 pytest
 ```
@@ -31,6 +34,23 @@ pytest
 Each generated day contains `window/afk/input/web/terminal/fs` jsonl streams,
 `labels.jsonl` (state segments, ground truth only), `help_requests.jsonl`,
 `manifest.json` and an importable `aw-export.json`.
+
+Each seed is a new person by default. To simulate one person across days, keep `--user`
+fixed and change `--seed` and `--date`:
+
+```bash
+cd synth && python -m synth --user 7 --seed 1 --date 2026-11-04 --out ../data/synthetic/user7/day1
+cd synth && python -m synth --user 7 --seed 2 --date 2026-11-05 --out ../data/synthetic/user7/day2
+```
+
+Behaviours a loader or classifier has to cope with, as in real exports:
+
+- `aw-export.json` stores events newest first, so sort before use.
+- Web events keep counting while Chrome is in the background. Intersect them with Chrome window
+  events to get time actually spent on a page.
+- A sleeping laptop leaves gaps in window, AFK and web, while input keeps reporting zeros.
+- Opening a chatbot is not a stuck signal: `help_requests.jsonl` includes brainstorming and quick looks.
+- `terminal` and `fs` come from custom hooks and do not exist in a stock ActivityWatch install.
 
 Bucket ids mirror the real watchers (`aw-watcher-window_<host>`), so one loader
 reads both real and synthetic exports. Match buckets by **type**, not id: a

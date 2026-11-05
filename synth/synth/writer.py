@@ -29,12 +29,13 @@ def write_day(result: dict, outdir: str | Path) -> Path:
         events = result["events"][key]
         _jsonl(out / f"{key}.jsonl", events)
         counts[key] = len(events)
+        # newest first, as a real ActivityWatch export is stored
         export[bid] = dict(id=bid, created=result["start_utc"], name=None, type=btype,
-                           client=client, hostname=HOST, data={}, events=events)
+                           client=client, hostname=HOST, data={}, events=events[::-1])
     _jsonl(out / "labels.jsonl", result["labels"])
     _jsonl(out / "help_requests.jsonl", result["help_requests"])
     manifest = {k: result[k] for k in
-                ("seed", "date", "tz_offset_h", "start_utc", "length_s", "style", "noise",
+                ("seed", "user", "date", "tz_offset_h", "start_utc", "length_s", "style", "noise",
                  "generator_version")}
     manifest["counts"] = counts
     manifest["buckets"] = {k: v[0] for k, v in BUCKETS.items()}

@@ -35,8 +35,7 @@ from .styles import UserStyle, sample_style
 BIN = 5.0             # seconds, matches aw-watcher-input
 AFK_TIMEOUT = 180.0   # seconds, aw-watcher-afk default
 STATES = ("flow", "stuck", "distracted", "neutral")
-GENERATOR_VERSION = "0.5"
-MAX_PRESSES = 26      # real aw-watcher-input max per bin
+GENERATOR_VERSION = "0.6"
 HOST = "synthetic-macbook.local"
 
 # Same id pattern, type and client as the real watchers, so one loader reads real and synthetic exports.
@@ -98,6 +97,7 @@ class Recorder:
         self.help: list[dict] = []
         self.pauses: list[tuple[float, float]] = []
         self.cmd_titles: list[tuple[float, float, dict]] = []
+        self.sleeps: list[tuple[float, float]] = []   # lid closed: window, afk and web stop reporting
         self.hook_off = False       # remote session: no zsh/fs hook events
         self.no_titles = False      # terminal-only editing: window title never shows the command
 
@@ -111,8 +111,8 @@ class Recorder:
 def profile(s: UserStyle, mode: str, kind: str) -> dict:
     r = s.typing_rate
 
-    def P(rate, duty, burst, click, mouse, scroll):
-        return dict(rate=rate, duty=duty, burst=burst, click=click,
+    def P(rate, duty, burst, click, mouse, scroll, partial=0.45):
+        return dict(rate=rate, duty=duty, burst=burst, click=click * s.click_scale, partial=partial,
                     mouse_p=min(mouse, 0.95), scroll_p=min(scroll, 0.95),
                     mouse_scale=s.mouse_scale, type_mouse_p=s.type_mouse_p, scroll_x_p=s.scroll_x_p)
 
@@ -120,7 +120,7 @@ def profile(s: UserStyle, mode: str, kind: str) -> dict:
     if kind == "editor":
         if stuck:
             return P(r * s.stuck_type_mult, s.stuck_duty, s.stuck_burst, 0.4, s.mouse_p * 1.4, s.scroll_p * 0.8)
-        return P(r, s.flow_duty, s.burst_bins, 0.15, s.mouse_p * 0.6, s.scroll_p * 0.3)
+        return P(r, s.flow_duty, s.burst_bins, 0.15, s.mouse_p * 0.8, s.scroll_p * 0.5)
     if kind == "terminal":
         return P(r * (0.35 if stuck else 0.5), 0.15 if stuck else 0.25, 2, 0.05,
                  s.mouse_p * 0.3, s.scroll_p * 0.2)
@@ -159,7 +159,11 @@ def profile(s: UserStyle, mode: str, kind: str) -> dict:
     if kind == "wait":                                        # long build/training run: present but idle
         return P(0, 0, 1, 0.03, s.mouse_p * 0.2, s.scroll_p * 0.3)
     if kind == "chat":
-        return P(r * 1.4, 0.6, 8, 0.3, s.mouse_p, s.scroll_p)
+        return P(max(r * 1.2, 11), 0.45, 5, 0.3, s.mouse_p, s.scroll_p, partial=0.15)  # a prompt or message, in full sentences
+    if kind == "ai_read":                                     # reading an answer: some scrolling, the odd click
+        return P(0, 0, 1, 0.25, s.mouse_p * 0.8, s.scroll_p * 0.8)
+    if kind == "agent_prompt":                                # a short instruction or an approval to Claude Code
+        return P(r * 0.7, 0.55, 3, 0.12, s.mouse_p * 0.9, s.scroll_p * 0.4)
     if kind == "browse":
         return P(r * 0.5, 0.06, 2, 0.5, s.mouse_p * 1.6, 0.45)
     if kind == "email":
@@ -188,10 +192,10 @@ def fill(rec: Recorder, rng: random.Random, nprng: np.random.Generator,
     for i in range(i0, i1):
         typed = False
         if on:
-            if rng.random() < 0.3:                            # partial bin: burst edge, shortcut, arrow keys
+            if rng.random() < p["partial"]:                   # partial bin: burst edge, shortcut, arrow keys
                 rec.presses[i] += rng.randint(1, 5)
             else:
-                rec.presses[i] += min(26, nprng.poisson(rate * rng.uniform(0.6, 1.4)))  # real p99 ~24
+                rec.presses[i] += nprng.poisson(rate * rng.uniform(0.6, 1.4))           # no cap: the watcher has none
             typed = True
             if rng.random() < leave:
                 on = False
@@ -200,12 +204,13 @@ def fill(rec: Recorder, rng: random.Random, nprng: np.random.Generator,
         elif typing and rng.random() < 0.04:                  # stray shortcut (cmd-s, cmd-c) between bursts
             rec.presses[i] += rng.randint(1, 3)
             typed = True
-        if p["click"] > 0:
-            rec.clicks[i] += nprng.poisson(p["click"])
         # aw-watcher-input stores magnitudes: deltaX/deltaY/scrollX/scrollY are never negative
-        if rng.random() < p["mouse_p"] or (typed and rng.random() < p["type_mouse_p"]):
+        moved = rng.random() < p["mouse_p"] or (typed and rng.random() < p["type_mouse_p"])
+        if moved:
             rec.dx[i] += float(nprng.lognormal(math.log(p["mouse_scale"]), 0.9))
             rec.dy[i] += float(nprng.lognormal(math.log(p["mouse_scale"] * 0.55), 0.9))
+        if p["click"] > 0:                                    # people point, then click
+            rec.clicks[i] += nprng.poisson(p["click"] * (1.5 if moved else 0.25))
         if rng.random() < p["scroll_p"]:                      # trackpad inertia: long tail
             rec.sy[i] += int(min(3000, nprng.lognormal(math.log(40), 1.3)))
             if rng.random() < p["scroll_x_p"]:
@@ -229,6 +234,8 @@ class Player:
         b = min(a + max(dur, 0.0), self.end)
         if b <= a:
             return None
+        if self.end - b < 2.0:                                # don't leave a sliver at the end of a segment
+            b = self.end
         self.rec.focus_to(a, win)
         fill(self.rec, self.rng, self.nprng, a, b, profile(self.style, mode or self.mode, kind))
         self.t, self.win = b, win
@@ -270,12 +277,26 @@ def add_commit(rec, rng, iv, proj):
     add_command(rec, rng, iv, "git", 0, None, None, "git commit -m wip", proj)
 
 
+def chat_home(rng, st):
+    """People mostly stick to one AI tool."""
+    if rng.random() < 0.85:
+        return C.CHAT_WINDOWS[st.ai_home % len(C.CHAT_WINDOWS)]
+    return rng.choice(C.CHAT_WINDOWS)
+
+
+def chat_len(rng):
+    """Most AI visits are a quick look at an answer; a few become long conversations."""
+    return min(max(rng.lognormvariate(math.log(22), 1.3), 8.0), 1500.0)
+
+
 def open_chat(rec, pl, rng, seg, kind, chat_dur):
-    cw = rng.choice(C.CHAT_WINDOWS)
-    iv = pl.run("chat", chat_dur * 0.6, cw)
+    cw = chat_home(rng, pl.style)
+    fresh = pl.win != cw                                      # already there: nothing was opened
+    iv = pl.run("chat", chat_dur * 0.4, cw)
     if iv:
-        rec.help.append(dict(t=iv[0], kind=kind, segment=seg.idx, win=dict(cw)))
-        pl.run("read", chat_dur * 0.4, cw)
+        if fresh:
+            rec.help.append(dict(t=iv[0], kind=kind, segment=seg.idx, win=dict(cw)))
+        pl.run("ai_read", chat_dur * 0.6, cw)
     return cw
 
 
@@ -286,7 +307,7 @@ def help_open(rec, pl, rng, seg, kind, chat_dur, st, work_win):
         iv = pl.run("inline_chat", chat_dur * 0.5, work_win)
         if iv:
             rec.help.append(dict(t=iv[0], kind=kind + "_inline", segment=seg.idx, win=dict(work_win)))
-            pl.run("read", chat_dur * 0.5, work_win)
+            pl.run("ai_read", chat_dur * 0.5, work_win)
         return work_win
     return open_chat(rec, pl, rng, seg, kind, chat_dur)
 
@@ -299,7 +320,7 @@ def agent_stint(rec, pl, rng, proj, task, dur, kind="watch"):
         t, i = iv[0] + rng.uniform(0.3, 2.0), rng.randrange(2)
         stop = iv[1] - rng.uniform(1.0, 4.0)                   # ends idle (✳), waiting for the user
         while t < stop:
-            d = 0.96 + (rng.random() * 0.12 if rng.random() < 0.85 else rng.uniform(0.5, 2.5))
+            d = 0.955 + (rng.random() * 0.02 if rng.random() < 0.85 else rng.uniform(0.5, 2.5))
             rec.cmd_titles.append((t, min(t + d, stop),
                                    {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_SPIN[i % 2], task)}))
             t += d
@@ -326,6 +347,26 @@ class CodeUI:
 
 def bwin(app, page):
     return C.browser_win(app, page["url"], page["title"])
+
+
+def edit_stint(rec, pl, rng, st, pj, ui, ctx, dwell):
+    """Editing hops between open files: same app in front, a new title each time."""
+    left = dwell
+    while left > 0 and not pl.done:
+        hop = min(left, max(rng.expovariate(1.0 / 50.0), 8.0))
+        iv = pl.run(ui.ekind, hop, ui.editor(ctx.file))
+        if iv:
+            add_saves(rec, rng, st, iv[0], iv[1], pj.name, ctx.file)
+        left -= hop
+        if left > 0 and rng.random() < 0.6:
+            ctx.file = W.next_file(rng, pj, ctx.file)
+
+
+def browse_stint(pl, rng, app, first, more, lo, hi):
+    """A lookup rarely stops at one page: follow a link or two in the same browser."""
+    pl.run("browser", rng.uniform(lo, hi), bwin(app, first))
+    while not pl.done and rng.random() < 0.4:
+        pl.run("browser", rng.uniform(lo, hi), bwin(app, more()))
 
 
 def term_win(proj_name):
@@ -360,6 +401,8 @@ def add_saves_nc(rec, rng, st, a, b, ws, force_end=False):
 def emit_flow(seg, rec, rng, nprng, st, ctx):
     if seg.subtype == "review":
         return emit_review(seg, rec, rng, nprng, st, ctx)
+    if seg.subtype == "ai_collab":
+        return emit_ai_collab(seg, rec, rng, nprng, st, ctx)
     return (emit_flow_coding if ctx.mode == "coding" else emit_flow_nc)(seg, rec, rng, nprng, st, ctx)
 
 
@@ -381,16 +424,18 @@ def emit_flow_coding(seg, rec, rng, nprng, st, ctx):
             help_open(rec, pl, rng, seg, "incidental", rng.uniform(30, 90), st, ui.editor(ctx.file))
             chat_at = None
             continue
-        dwell = min(max(rng.expovariate(st.flow_switch_per_min / 60.0), 40.0), 600.0)
-        iv = pl.run(ui.ekind, dwell, ui.editor(ctx.file))
-        if iv:
-            add_saves(rec, rng, st, iv[0], iv[1], proj, ctx.file)
+        dwell = min(max(rng.expovariate(st.flow_switch_per_min / 60.0), 20.0), 600.0)
+        edit_stint(rec, pl, rng, st, pj, ui, ctx, dwell)
         if pl.done:
             break
+        if rng.random() < st.ai_glance_p:
+            open_chat(rec, pl, rng, seg, "incidental", chat_len(rng))
+            if pl.done:
+                break
         roll = rng.random()
         if roll < 0.62 and not ui.remote and rng.random() < st.agent_flow_p:
             # drive Claude Code: type an instruction, watch it work, approve a step
-            pl.run("chat", rng.uniform(8, 30), {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)})
+            pl.run("agent_prompt", rng.uniform(8, 30), {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)})
             agent_stint(rec, pl, rng, proj, task, rng.uniform(20, 120))
             if rng.random() < 0.3:
                 task = W.agent_task(rng)
@@ -421,7 +466,7 @@ def emit_flow_coding(seg, rec, rng, nprng, st, ctx):
                     kind = rng.choice(cmd_kinds)
                     add_command(rec, rng, iv, kind, 0, None, None, W.cmd_string(rng, pj, kind, mod), proj)
         elif roll < 0.90:
-            pl.run("browser", rng.uniform(10, 60), bwin(app, W.lookup_page(rng, pj)))
+            browse_stint(pl, rng, app, W.lookup_page(rng, pj), lambda: W.lookup_page(rng, pj), 10, 60)
         if rng.random() < 0.35:
             ctx.file = W.next_file(rng, pj, ctx.file)         # module <-> test, neighbours
     for _ in range(int(nprng.poisson(dur / 60.0 / 15.0))):
@@ -444,13 +489,17 @@ def emit_flow_nc(seg, rec, rng, nprng, st, ctx):
             help_open(rec, pl, rng, seg, "incidental", rng.uniform(30, 90), st, ws.win)
             chat_at = None
             continue
-        dwell = min(max(rng.expovariate(st.flow_switch_per_min / 60.0), 40.0), 600.0)
+        dwell = min(max(rng.expovariate(st.flow_switch_per_min / 60.0), 20.0), 600.0)
         nc_run(pl, rec, rng, st, ws, kind, dwell)
         if pl.done:
             break
+        if rng.random() < st.ai_glance_p:
+            open_chat(rec, pl, rng, seg, "incidental", chat_len(rng))
+            if pl.done:
+                break
         roll = rng.random()
         if roll < 0.5:
-            pl.run("browser", rng.uniform(10, 70), bwin(app, W.nc_page(rng, ws)))
+            browse_stint(pl, rng, app, W.nc_page(rng, ws), lambda: W.nc_page(rng, ws), 10, 70)
         elif roll < 0.65:
             pl.run("pdf", rng.uniform(30, 120), W.pdf_win(rng))
     for _ in range(int(nprng.poisson(dur / 60.0 / 10.0))):    # thinking pauses are common when writing
@@ -480,6 +529,10 @@ def emit_stuck_coding(seg, rec, rng, nprng, st, ctx):
                     variant="logic_bug" if pr.silent else "error", error_type=pr.etype,
                     error_msg=pr.msg, error_sigs=[] if pr.silent else [pr.sig] + ([pr.sig2] if pr.sig2 else []),
                     lib=pr.lib, cmd_kind=pr.cmd_kind, suspects=[f.name for f in pr.suspects], keywords=kw)
+    # Going round in circles with an agent: same failure, new prompt. From outside it resembles productive AI work.
+    ai_loop = not ui.remote and rng.random() < min(0.85, st.ai_work_p * 1.5)
+    seg.meta["ai_loop"] = ai_loop
+    task = "Fix failing tests" if rng.random() < 0.5 else W.agent_task(rng)
     pl = Player(rec, rng, nprng, st, "stuck", seg.start, seg.end)
     cur = pr.suspects[0]
     pace, outcome = st.stuck_pace, seg.outcome
@@ -503,6 +556,14 @@ def emit_stuck_coding(seg, rec, rng, nprng, st, ctx):
             else:
                 sig = pr.sig2 if pr.sig2 and rng.random() < 0.1 else pr.sig
                 add_command(rec, rng, iv, pr.cmd_kind, 1, sig, pr.etype, pr.cmd_str, proj)
+        if ai_loop:
+            pl.run("agent_prompt", cap(rng.uniform(8, 35) * pace),
+                   {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)})
+            agent_stint(rec, pl, rng, proj, task, cap(rng.uniform(20, 90) * pace))
+            pl.run("reading", cap(rng.uniform(10, 40) * pace), ui.editor(cur))
+            if cap(1.0) <= 0:
+                break
+            continue
         pl.run("read", cap(rng.uniform(5, 35) * pace / edit_x), ui.term(cur))     # idle gap after a run
         if rng.random() < 0.55 / edit_x ** 0.5:
             pl.run("browser", cap(rng.uniform(20, 110) * pace), bwin(pr.browser, rng.choice(pr.pages)))
@@ -623,6 +684,53 @@ def emit_review(seg, rec, rng, nprng, st, ctx):
     ctx.unresolved = False
 
 
+def emit_ai_collab(seg, rec, rng, nprng, st, ctx):
+    """Productive work done with an AI: brainstorming in a chat app or directing an agent.
+
+    Few keystrokes and plenty of toggling, the same outward signs as being stuck, but nothing is wrong.
+    Labeled flow on purpose: opening a chatbot does not mean someone needs help.
+    """
+    pl = Player(rec, rng, nprng, st, "flow", seg.start, seg.end)
+    home = chat_home(rng, st)
+    coding = ctx.mode == "coding"
+    if coding:
+        pj = ctx.project
+        proj = pj.name
+        ui = CodeUI(proj, False, False)                       # the agent runs in a local terminal
+        task = W.agent_task(rng)
+        base = {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)}
+        seg.meta = dict(mode="coding", project=proj, stack=pj.stack, libs=pj.libs, variant="ai_collab",
+                        vim=False, remote=False)
+        dur = seg.end - seg.start
+        rec.term.append(dict(t=seg.start + rng.uniform(1, min(30.0, dur / 2)), dur=dur * rng.uniform(0.5, 0.9),
+                             data=dict(exit_code=0, cmd_kind="agent", error_sig=None, error_type=None)))
+    else:
+        ws = ctx.ws
+        kind = nc_kind(ws)
+        seg.meta = dict(mode=ws.kind, workspace=ws.name, fmt=ws.fmt, libs=ws.libs, variant="ai_collab")
+    app = rng.choice(BROWSERS)
+    while not pl.done:
+        r = rng.random()
+        if coding and r < 0.55:                               # instruct, watch, review what it did
+            pl.run("agent_prompt", rng.uniform(8, 35), base)
+            agent_stint(rec, pl, rng, proj, task, rng.uniform(20, 150))
+            if rng.random() < 0.45:
+                ctx.file = W.next_file(rng, pj, ctx.file)
+                pl.run("reading", rng.uniform(15, 90), ui.editor(ctx.file))
+            if rng.random() < 0.25:
+                task = W.agent_task(rng)
+                base = {"app": "Terminal", "title": W.agent_title(proj, W.AGENT_IDLE, task)}
+        elif r < 0.8:                                         # think it through in the chat app
+            open_chat(rec, pl, rng, seg, "ai_work", chat_len(rng) * rng.uniform(1.0, 4.0))
+        elif coding:
+            browse_stint(pl, rng, app, W.lookup_page(rng, pj), lambda: W.lookup_page(rng, pj), 10, 60)
+        elif r < 0.92:                                        # turn the ideas into the document
+            nc_run(pl, rec, rng, st, ws, kind, rng.uniform(40, 240))
+        else:
+            browse_stint(pl, rng, app, W.nc_page(rng, ws), lambda: W.nc_page(rng, ws), 10, 70)
+    ctx.unresolved = False
+
+
 def emit_waiting(seg, rec, rng, nprng, st, ctx):
     """Present but idle: a long build/training run, or supervising an AI coding agent."""
     pl = Player(rec, rng, nprng, st, "neutral", seg.start, seg.end)
@@ -669,7 +777,7 @@ def emit_waiting(seg, rec, rng, nprng, st, ctx):
                 if iv:
                     rec.presses[min(rec.n - 1, int(iv[0] // BIN))] += rng.randint(1, 3)
             elif r < 0.6:
-                pl.run("chat", rng.uniform(10, 40), base)                 # type the next instruction
+                pl.run("agent_prompt", rng.uniform(10, 40), base)         # type the next instruction
             elif r < 0.8:
                 pl.run("reading", rng.uniform(20, 90), ui.editor(ctx.file))   # review the diff
             else:
@@ -681,6 +789,8 @@ def emit_distracted(seg, rec, rng, nprng, st, ctx):
     dur = seg.end - seg.start
     if seg.subtype == "lunch" or (dur > 480 and rng.random() < 0.6):
         rec.focus_to(seg.start, C.LOCK_WIN)          # input stays zero; nothing else to do
+        if rng.random() < 0.4:                       # some leave the laptop to sleep once the screen is off
+            rec.sleeps.append((seg.start + rng.uniform(185, 400), seg.end - rng.uniform(5, 30)))
 
 
 def emit_neutral(seg, rec, rng, nprng, st, ctx):
@@ -782,7 +892,8 @@ def next_segment(rng, st, prev, ctx, t, lunched, length):
         d = lognorm_min(rng, st.flow_mean_min, 4, 60)
         if rng.random() < st.deep_block_p:                # a long deep-work stretch
             d = min(d * rng.uniform(2.0, 3.5), 90 * 60.0)
-        return state, ("review" if rng.random() < st.review_p else "work"), d, None
+        r = rng.random()
+        return state, ("ai_collab" if r < st.ai_work_p else "review" if r < st.ai_work_p + st.review_p else "work"), d, None
     if state == "stuck":
         r = rng.random()
         outcome = ("help" if r < st.help_p
@@ -834,10 +945,64 @@ def _boundaries(rng, n, length, level):
     return b
 
 
+def _awake(a, b, sleeps):
+    """The parts of [a, b) when the machine is not asleep."""
+    out, cur = [], a
+    for s, e in sleeps:
+        if e <= cur or s >= b:
+            continue
+        if s > cur:
+            out.append((cur, s))
+        cur = max(cur, e)
+    if cur < b:
+        out.append((cur, b))
+    return out
+
+
+def _web_events(window, rng, t0):
+    """aw-watcher-web reports Chrome's active tab on tab changes and a timer, whichever app is in front.
+
+    So a tab keeps accumulating time long after the user leaves Chrome, until the screen locks or
+    the browser stops reporting. Coming back to the same tab adds nothing new.
+    """
+    sec = lambda e: (datetime.fromisoformat(e["timestamp"]) - t0).total_seconds()
+    web, tabs, cur, stop = [], rng.randint(6, 30), None, None
+
+    def close(at):
+        nonlocal cur
+        if cur is not None:
+            cur["duration"] = round(max(0.0, at - sec(cur)), 3)
+            web.append(cur)
+            cur = None
+
+    for e in window:
+        a, d = sec(e), e["data"]
+        if cur is not None and a >= stop:
+            close(stop)
+        if d.get("app") == C.LOCK_WIN["app"]:
+            close(a)
+        elif d.get("app") == "Google Chrome" and d.get("url"):
+            if cur is None or (cur["data"]["url"], cur["data"]["title"]) != (d["url"], d["title"]):
+                close(a)
+                if rng.random() < 0.08:
+                    tabs = int(min(40, max(1, tabs + rng.choice([-2, -1, 1, 1, 2]))))
+                cur = dict(timestamp=e["timestamp"], duration=0.0, data=dict(
+                    url=d["url"], title=d["title"], audible="youtube.com/watch" in d["url"],
+                    incognito=False, tabCount=tabs))
+            stop = a + e["duration"] + rng.expovariate(1.0 / 1200.0)
+    if cur is not None and window:
+        close(min(stop, sec(window[-1]) + window[-1]["duration"]))
+    return web
+
+
 def build_events(rec: Recorder, t0: datetime, length: float, rng: random.Random | None = None,
                  level: float = 0.0) -> dict:
     rng = rng or random.Random(0)
-    rec.presses = np.minimum(rec.presses, MAX_PRESSES)
+    sleeps = sorted(rec.sleeps)
+    for a, b in sleeps:                                       # nothing can reach the watcher while asleep
+        i0, i1 = max(0, math.ceil(a / BIN)), min(rec.n, math.ceil(b / BIN))
+        for arr in (rec.presses, rec.clicks, rec.dx, rec.dy, rec.sx, rec.sy):
+            arr[i0:i1] = 0
 
     # --- window
     window = []
@@ -846,7 +1011,8 @@ def build_events(rec: Recorder, t0: datetime, length: float, rng: random.Random 
         if end - t > 1e-6:
             if level > 0 and window and rng.random() < 0.004 * level:
                 window.append(dict(timestamp=iso(t0, t), duration=0.0, data=data))   # real zero-length heartbeat
-            window.append(dict(timestamp=iso(t0, t), duration=round(end - t, 3), data=data))
+            for x, y in _awake(t, end, sleeps):
+                window.append(dict(timestamp=iso(t0, x), duration=round(y - x, 3), data=data))
 
     # --- input: one cell per 5 s bin; a missed poll folds the next bin in (a ~10 s event)
     edges = _boundaries(rng, rec.n, length, level)
@@ -861,7 +1027,7 @@ def build_events(rec: Recorder, t0: datetime, length: float, rng: random.Random 
         if (level > 0 and any(r) and i + 1 < rec.n and any(row(i + 1)) and edges[i] >= i * BIN
                 and edges[i + 2] <= (i + 2) * BIN + 0.012 and rng.random() < 0.003 * level):
             r2 = row(i + 1)
-            r = (min(MAX_PRESSES, r[0] + r2[0]),) + tuple(a + b for a, b in zip(r[1:], r2[1:]))
+            r = tuple(a + b for a, b in zip(r, r2))
             cells.append((i, i + 2, r))
             i += 2
         else:
@@ -891,6 +1057,18 @@ def build_events(rec: Recorder, t0: datetime, length: float, rng: random.Random 
             afk_iv.append((prev_end, min(start, length)))
         if k < rec.n:
             prev_end = edges[k + 1]
+    # a locked screen counts as away within one 5 s poll, and a stray nudge can't end it
+    for k, (a, win) in enumerate(rec.focus):
+        if win["app"] == C.LOCK_WIN["app"]:
+            b = rec.focus[k + 1][0] if k + 1 < len(rec.focus) else length
+            afk_iv.append((min(b, a + rng.uniform(0.0, 5.0)) if level > 0 else a, b))
+    merged: list[tuple[float, float]] = []
+    for a, b in sorted(afk_iv):
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    afk_iv = merged
     rows = []                                                 # (start, end, status)
     cur = 0.0
     for a, b in afk_iv:
@@ -906,18 +1084,10 @@ def build_events(rec: Recorder, t0: datetime, length: float, rng: random.Random 
         cur = b
     if length - cur > 1e-6:
         rows.append((cur, length, "not-afk"))
-    afk = [dict(timestamp=iso(t0, a), duration=round(b - a, 3), data={"status": st}) for a, b, st in rows]
+    afk = [dict(timestamp=iso(t0, x), duration=round(y - x, 3), data={"status": st})
+           for a, b, st in rows for x, y in (_awake(a, b, sleeps) if b > a else [(a, b)])]
 
-    # --- web: aw-watcher-web (Chrome extension) mirrors the focused Chrome tab, with tab metadata
-    web, tabs = [], rng.randint(6, 30)
-    for e in window:
-        d = e["data"]
-        if d.get("app") == "Google Chrome" and d.get("url"):
-            if rng.random() < 0.08:
-                tabs = int(min(40, max(1, tabs + rng.choice([-2, -1, 1, 1, 2]))))
-            web.append(dict(timestamp=e["timestamp"], duration=e["duration"], data=dict(
-                url=d["url"], title=d["title"], audible="youtube.com/watch" in d["url"],
-                incognito=False, tabCount=tabs)))
+    web = _web_events(window, rng, t0)
 
     def fmt(rows):
         return [dict(timestamp=iso(t0, r["t"]), duration=round(r["dur"], 3), data=r["data"])
@@ -927,17 +1097,23 @@ def build_events(rec: Recorder, t0: datetime, length: float, rng: random.Random 
 
 
 def generate_day(seed: int, day: date, tz_offset_h: float = -7.0,
-                 start_hour: float = 9.0, end_hour: float = 17.5, noise: float = 1.0) -> dict:
-    """`noise` scales background noise (0 = clean ablation, 1 = default, 2 = heavy)."""
+                 start_hour: float = 9.0, end_hour: float = 17.5, noise: float = 1.0,
+                 user: int | None = None) -> dict:
+    """`noise` scales background noise (0 = clean ablation, 1 = default, 2 = heavy).
+
+    By default each seed is a new person. Pass `user` to keep one person, with the same habits,
+    projects and documents, across days that differ by `seed`.
+    """
     rng = random.Random(seed)
     nprng = np.random.default_rng(seed)
-    st = sample_style(rng)
+    who = rng if user is None else random.Random(f"user-{user}")
+    st = sample_style(who)
     length = (end_hour - start_hour) * 3600.0
     t0 = (datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
           + timedelta(hours=start_hour - tz_offset_h))
     rec = Recorder(int(math.ceil(length / BIN)))
-    projects = [W.make_project(rng) for _ in range(rng.randint(1, 2))]
-    workspaces = {k: [W.make_workspace(rng, k) for _ in range(rng.randint(1, 2))] for k in ("writing", "analysis")}
+    projects = [W.make_project(who) for _ in range(who.randint(1, 2))]
+    workspaces = {k: [W.make_workspace(who, k) for _ in range(who.randint(1, 2))] for k in ("writing", "analysis")}
     ctx = Ctx(project=projects[0], file=None, projects=projects)
     ctx.file = rng.choice([f for f in ctx.project.files if f.kind == "impl"])
     ctx.mode = wchoice(rng, MODE_W)
@@ -981,6 +1157,6 @@ def generate_day(seed: int, day: date, tz_offset_h: float = -7.0,
                      app=h["win"]["app"], title=h["win"]["title"], url=h["win"].get("url"))
                 for h in sorted(rec.help, key=lambda h: h["t"])]
     return dict(
-        seed=seed, date=day.isoformat(), tz_offset_h=tz_offset_h, start_utc=t0.isoformat(),
+        seed=seed, user=user, date=day.isoformat(), tz_offset_h=tz_offset_h, start_utc=t0.isoformat(),
         length_s=length, style=st.as_dict(), noise=noise, events=events, labels=labels,
         help_requests=help_req, generator_version=GENERATOR_VERSION)
