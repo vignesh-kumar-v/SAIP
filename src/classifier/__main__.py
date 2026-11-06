@@ -1,6 +1,6 @@
-"""CLI, run from classifier/.
+"""CLI, run from the repo root (after `pip install -e .`, or with PYTHONPATH=src).
 
-  python -m classifier score --export ../aw-buckets-export.json [--out scores.jsonl]
+  python -m classifier score --export aw-buckets-export.json [--out scores.jsonl]
   python -m classifier evaluate --split dev
 """
 from __future__ import annotations
@@ -63,7 +63,7 @@ def main() -> None:
     s.set_defaults(func=cmd_score)
 
     e = sub.add_parser("evaluate", parents=[common], help="check scores against the synthetic labels")
-    e.add_argument("--data", default="../data/synthetic")
+    e.add_argument("--data", default="data/synthetic")
     e.add_argument("--split", choices=["dev", "test"], default="dev")
     e.add_argument("--threshold", type=float, default=None)
     e.set_defaults(func=cmd_evaluate)

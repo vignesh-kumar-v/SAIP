@@ -1,15 +1,18 @@
 """Generate the synthetic dataset: several people, each with several working days, then check it from disk.
 
-Run from the repo root: python synth/generate_dataset.py
+Run from the repo root: python scripts/generate_dataset.py
 Defaults reproduce the shared dataset (20 people, 10 days each). A day's seed is user * 1000 + day.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))   # run without installing the package
 
 from synth.generator import generate_day
 from synth.writer import write_day

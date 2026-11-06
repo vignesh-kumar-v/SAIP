@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "saip"
+version = "0.1.0"
+description = "Proactive agent research: detect flow vs stuck from desktop telemetry and decide when to interrupt."
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+# src layout: `pip install -e .` makes `python -m synth` and `python -m classifier` work from anywhere.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+classifier = ["weights.json"]

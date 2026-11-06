@@ -2,6 +2,8 @@
 data/
 .venv/
 __pycache__/
+*.egg-info/
+build/
 .pytest_cache/
 
 # Real ActivityWatch exports: personal telemetry (window titles, URLs). Never commit.
