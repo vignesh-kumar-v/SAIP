@@ -1,0 +1,32 @@
+# Copy to private.toml (gitignored) or let `saip setup` write it. Lookup order: $SAIP_CONFIG, ./private.toml,
+# then the per-user config folder. SAIP_LLM_BASE_URL / SAIP_LLM_MODEL / SAIP_LLM_API_KEY override the [llm] values.
+
+[llm]
+base_url = "http://localhost:8000/v1"   # OpenAI-compatible, must return logprobs (vLLM, llama.cpp server, Ollama /v1)
+model = "your-model-name"
+api_key = ""
+# timeout_s = 30
+# samples = 10               # re-check near the bar: ask this many times, use the share of "yes"
+# sample_temperature = 0.7
+# lookback_s = 300           # how much recent activity the model is shown
+# include_titles = false     # window titles stay on this machine unless you turn this on
+# private_apps = ["Messages", "Signal"]   # never named in what the model sees
+
+[gate]                        # the decision rule; see docs/State_Aware_Interruption_Formulas.md
+# c0 = 1.0                    # base false-alarm cost
+# m0 = 2.0                    # base miss cost
+# alpha = 1.0986              # ln 3: interrupting full flow is 3x worse than usual
+# beta = 0.6931               # ln 2: missing a stuck user is 2x worse than usual
+# delta = 0.1                 # near-miss margin
+# theta_flow = 0.5            # flow above this defers a near miss instead of dropping it
+
+[agent]
+watch_roots = []              # folders searched for git repositories, e.g. ["~/Developer"]; managed by `saip repo`
+# exclude = []                # folders or repos never to ask about
+# new_repos = "ask"           # a repo that appears later: "ask" (popup), "add" (silently), or "ignore"
+# rescan_s = 300              # how often the folders are searched for new repos
+# tick_s = 5
+# assess_interval_s = 30      # at most one LLM assessment per this long
+# cooldown_s = 300            # quiet period after an offer
+# pending_expiry_s = 600      # a deferred offer is dropped after this long
+# break_idle_s = 5            # no input for this long counts as a natural break

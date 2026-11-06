@@ -10,20 +10,22 @@ See `docs/ProActive_Agent_Implementation_Plan.md` for the five-phase roadmap.
 src/                       importable packages, side by side
   synth/                     synthetic ActivityWatch day generator (Phase 1 fixtures): world, styles, generator, noise, writer, summary
   classifier/                stuck-state classifier (Phase 2): loader, categories, features, scorer, evaluate, weights.json
+  llm/                       Phase 3: endpoint client, context, yes/no probes, calibration, state-aware gate, replay eval
+  saip/                      the app: `saip` command, first-run setup, ActivityWatcher client, live loop, OS adapters, hooks
 tests/                     mirrors src/
-  synth/                     pytest suite for the generator
-  classifier/                pytest suite for the classifier
+  synth/ classifier/ llm/ saip/   pytest suites
 scripts/
   generate_dataset.py        builds the shared multi-person dataset
 docs/
   ProActive_Agent_Implementation_Plan.md
 data/                      generated output (gitignored)
-pyproject.toml             package metadata; `pip install -e .` puts synth and classifier on the path
+pyproject.toml             package metadata; `pip install -e .` puts the packages on the path and installs the `saip` command
+private.example.toml       template for private.toml (endpoint, gate costs, agent timings); private.toml is gitignored
+.github/workflows/ci.yml   runs the tests on macOS, Windows and Linux
 pytest.ini  requirements.txt
 ```
 
-Everything runs from the repo root. New components (bench, live agent, LLM layer) get their own
-folder under `src/` and `tests/`.
+Everything runs from the repo root. New components get their own folder under `src/` and `tests/`.
 
 ## Running
 
@@ -71,6 +73,91 @@ Behaviours a loader or classifier has to cope with, as in real exports:
 Bucket ids mirror the real watchers (`aw-watcher-window_<host>`), so one loader
 reads both real and synthetic exports. Match buckets by **type**, not id: a
 hostname change on a real machine creates a second set of buckets.
+
+## The app
+
+One command sets everything up the first time and then watches your machine:
+
+```bash
+pip install -e .
+saip run              # first run: set up, then watch and decide. Ctrl-C to stop.
+saip doctor           # check every moving part
+saip setup            # just the setup (safe to repeat)
+saip uninstall        # remove the shell hook (add --purge to delete private.toml too)
+```
+
+First-run setup, in order, asking before anything changes your machine (`--yes` answers yes to all):
+
+1. Checks ActivityWatcher is running, and installs and starts it if missing (Homebrew on macOS, winget on Windows,
+   a download link on Linux).
+2. Writes `private.toml` with your LLM endpoint and model.
+3. Adds a marked block to your shell start-up file (zsh, bash or PowerShell). It reports each command's exit
+   status only, never the command text, so failed commands and repeats are visible to the classifier.
+4. Asks for a folder that contains your git projects (for example `~/Developer`), lists every repository under it,
+   and after one confirmation adds a `post-commit` hook to each. The hook sends only the word "commit".
+5. Looks at what ActivityWatcher actually records. If window titles are empty or the input counts are all zero, a
+   macOS permission is missing, and it says which one.
+
+**Commit hooks.** Git runs `.git/hooks/post-commit` after every real commit, so the agent is told the moment a
+commit happens (a branch switch or pull does not count). The hook is added at the top of an existing hook without
+touching its lines, runs in the background and ignores errors, so it cannot slow down or break a commit.
+A repo is skipped, with the reason shown, when a hook cannot be added safely: it sets its own `core.hooksPath`
+(husky and similar), its hook is not a shell script, or the hook file is not executable. Skipped repos you accept
+are checked by polling `git rev-parse HEAD` instead.
+
+**New repositories.** While `saip run` is going it rescans your folders every few minutes. A repo it has not seen
+before is never hooked on its own: a dialog asks **Add / Not now / Never** (a terminal question where the system
+cannot show a dialog). Not now asks again next run, Never is remembered. Set `new_repos = "add"` or `"ignore"` in
+`private.toml` to change that. Manage folders with:
+
+```bash
+saip repo add ~/Developer     # find and hook every repo under it
+saip repo list                # each repo and whether its hook is working
+saip repo remove ~/Developer/old-project
+```
+
+**Undoing it.** `saip uninstall` puts the machine back as it was before SAIP. Setup records every change it makes,
+and uninstall lists them, asks once, then reverses each: the shell block (and the profile file, if setup created
+it), every repo hook (an existing hook returns byte for byte), the buckets SAIP created in ActivityWatcher, the
+settings files setup wrote, ActivityWatcher itself if setup installed it, and finally the `saip` package. A
+`private.toml` that existed before setup is left alone, your recorded ActivityWatcher history is never deleted,
+and `--keep-config` / `--keep-command` keep the settings or the command.
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| Status | tested | experimental | experimental |
+| Install ActivityWatcher | `brew install --cask` | `winget install` | link only |
+| Shell hook | zsh `~/.zshrc` | PowerShell `$PROFILE` | bash `~/.bashrc` |
+| Notification | `osascript` | toast | `notify-send` |
+| Add-this-repo dialog | `osascript` | message box | `zenity` (else terminal) |
+
+"Experimental" means the adapter follows the same interface and its logic is covered by tests with the OS
+calls faked, but it has not been run on a real machine yet. The CI matrix runs those tests on all three systems.
+On Linux, ActivityWatcher's window watcher needs an X11 session; Wayland cannot see the focused window.
+`classifier/categories.py` also lists Windows and Linux app names on a best-effort basis: an unknown app counts
+as "other" and does not count as work, so extend the sets when a real export shows new names.
+
+**Privacy.** Keys are counted, never recorded. The terminal hook sends an exit code and a hash, not the command.
+What the model sees is a short summary of app names, dwell times and counts; window titles stay out unless
+`include_titles = true`, and apps on `private_apps` are never named. Everything is sent only to the endpoint you
+configure.
+
+## The LLM layer (Phase 3)
+
+`src/llm` turns the classifier's stuck score plus two yes/no questions into speak, wait or quiet. The
+formulas and their derivation are in `docs/State_Aware_Interruption_Formulas.md` (`.html` is the rendered copy).
+
+```bash
+python -m llm gate                                   # the bar tau for a grid of stuck scores
+python -m llm replay --mock --split dev              # run synthetic days through the pipeline, no model needed
+python -m llm replay --split dev --fit               # real endpoint: fit calibration temperatures on dev people
+python -m llm replay --split test                    # then report on the people held out
+```
+
+`--mock` is a deterministic stand-in that checks the plumbing and says nothing about a real model. The generator
+has no acceptance label, so `--fit` fits `T_accept` on the stuck label as a stand-in. Both caveats are printed.
+The synthetic labels come from our own generator, so replay numbers test the pipeline and are not evidence about
+real users.
 
 ## Classifier
 

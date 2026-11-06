@@ -12,3 +12,6 @@ aw-*-export*.json
 
 # Third-party datasets brought in for reference: no license confirmed. Never commit.
 labelled-awt-data/
+
+# Your endpoint details and API key
+private.toml
