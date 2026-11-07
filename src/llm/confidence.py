@@ -35,8 +35,17 @@ def probe(client: ChatClient, messages: list, top_logprobs: int = 10) -> float:
 
 
 def resampled_share(client: ChatClient, messages: list, k: int, temperature: float) -> float:
-    """Ask k times in one request and return the fraction of answers that start with yes."""
-    choices = client.complete(messages, max_tokens=3, temperature=temperature, n=k)
+    """Ask k times and return the fraction of answers that start with yes.
+
+    One request with n=k where the server honours it; some servers (certain Ollama versions) ignore `n` and
+    return a single choice, so the rest are fetched one at a time rather than silently using fewer samples.
+    """
+    choices = list(client.complete(messages, max_tokens=3, temperature=temperature, n=k))
+    while len(choices) < k:
+        more = client.complete(messages, max_tokens=3, temperature=temperature, n=1)
+        if not more:
+            break
+        choices.extend(more[:k - len(choices)])
     return sum(c.text.strip().lower().startswith("yes") for c in choices) / len(choices)
 
 

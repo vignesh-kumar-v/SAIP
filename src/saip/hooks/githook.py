@@ -67,6 +67,22 @@ def _with_block(text: str, python: str) -> str:
     return block + text
 
 
+def _python_works(text: str, python: str) -> bool:
+    """The hook is fine if it names this Python, or any Python that still exists and can be run.
+
+    `.venv/bin/python` and `.venv/bin/python3.12` are the same interpreter under two names, so comparing the
+    text alone would call a working hook stale. It is only stale when the interpreter it points at is gone.
+    """
+    m = re.search(r'"([^"\n]+)" -m saip\.hooks commit', text)
+    if not m:
+        return False
+    named = m.group(1)
+    if named == Path(python).as_posix():
+        return True
+    p = Path(named)
+    return p.exists() and os.access(p, os.X_OK)
+
+
 def inspect(repo: Path, python: str) -> RepoState:
     repo = Path(repo)
     if not (repo / ".git").exists():
@@ -81,7 +97,7 @@ def inspect(repo: Path, python: str) -> RepoState:
     if path.exists():
         text = path.read_text(errors="replace")
         if has_block(text):
-            return RepoState(repo, INSTALLED if f'"{Path(python).as_posix()}"' in text else STALE)
+            return RepoState(repo, INSTALLED if _python_works(text, python) else STALE)
         first = text.split("\n", 1)[0]
         if first.startswith("#!") and not SHELLS.search(first):
             return RepoState(repo, SKIP, "existing post-commit hook is not a shell script")

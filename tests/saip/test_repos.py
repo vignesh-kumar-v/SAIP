@@ -144,6 +144,21 @@ def test_a_hook_pointing_at_an_old_python_is_stale_and_gets_refreshed(tmp_path):
     assert githook.inspect(r, PY).state == INSTALLED and "/old/python" not in hook(r).read_text()
 
 
+def test_a_hook_naming_the_same_interpreter_by_another_path_is_not_stale(tmp_path):
+    real = tmp_path / "python3.12"
+    real.write_text("#!/bin/sh\n")
+    real.chmod(0o755)
+    alias = tmp_path / "python"
+    if os.name != "nt":
+        alias.symlink_to(real)
+    r = repo(tmp_path / "r")
+    githook.install(r, str(real))
+    if os.name != "nt":
+        assert githook.inspect(r, str(alias)).state == INSTALLED       # same interpreter, different name
+    real.unlink()
+    assert githook.inspect(r, "/somewhere/else").state == STALE         # the interpreter it points at is gone
+
+
 def test_worktrees_use_the_right_hooks_folder(tmp_path):
     main = repo(tmp_path / "main")
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "x", cwd=main)

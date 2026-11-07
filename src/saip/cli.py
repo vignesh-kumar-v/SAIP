@@ -122,7 +122,7 @@ def cmd_uninstall(a) -> int:
 
 def cmd_run(a) -> int:
     plat, aw = current(), ActivityWatch(a.url)
-    if a.setup or not setup_mod.is_set_up():
+    if (a.setup or not setup_mod.is_set_up()) and not a.no_setup:
         print("First run: setting everything up.\n")
         cmd_setup(argparse.Namespace(url=a.url, yes=a.yes, root=a.root))
         print()
@@ -163,6 +163,8 @@ def cmd_run(a) -> int:
             try:
                 trace = fetch_trace(aw, now, cfg.history_min * 60)
                 tick = score_now(trace, now)
+                if a.trigger is not None:
+                    tick.theta_trig = a.trigger                # testing: wake the LLM at this score instead
             except NotReady as e:
                 if now - last_status > 60:
                     print(f"{time.strftime('%H:%M:%S')}  waiting: {e}")
@@ -210,6 +212,8 @@ def main(argv=None) -> int:
     r.add_argument("--setup", action="store_true", help="run setup again first")
     r.add_argument("--yes", action="store_true", help="answer yes to every setup question")
     r.add_argument("--root", action="append", help="folder whose git repositories get the commit hook (repeatable)")
+    r.add_argument("--no-setup", action="store_true", help="skip first-run setup and change nothing on this machine")
+    r.add_argument("--trigger", type=float, help="testing: wake the LLM above this stuck score (0 = every assessment interval)")
     r.add_argument("--mock-llm", action="store_true", help="use a deterministic stand-in for the model")
     r.add_argument("--notify", action="store_true", help="also show a system notification when it speaks")
     r.add_argument("--config", help="path to private.toml")

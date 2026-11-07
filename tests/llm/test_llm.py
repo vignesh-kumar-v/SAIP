@@ -71,6 +71,23 @@ def test_probe_and_resampled_share_use_the_client():
     assert client.calls[1]["n"] == 10
 
 
+class IgnoresN:
+    """A server that ignores `n` and always returns a single choice (as some Ollama versions do)."""
+
+    def __init__(self):
+        self.calls, self.answers = 0, iter(["Yes", "No", "Yes", "Yes", "No", "Yes"])
+
+    def complete(self, messages, *, max_tokens=1, temperature=0.0, logprobs=False, top_logprobs=10, n=1):
+        self.calls += 1
+        return [Choice(next(self.answers))]
+
+
+def test_resampling_still_gets_k_samples_when_the_server_ignores_n():
+    client = IgnoresN()
+    assert resampled_share(client, prompts.accept_messages("c"), 6, 0.7) == pytest.approx(4 / 6)
+    assert client.calls == 6
+
+
 def test_clip_keeps_probabilities_finite():
     assert clip(0.0) == 1e-3 and clip(1.0) == 1 - 1e-3 and clip(0.4) == 0.4
 
