@@ -31,7 +31,7 @@ class Weights:
 
 
 def load_weights(profile: str) -> Weights:
-    p = json.loads(WEIGHTS_FILE.read_text())[profile]
+    p = json.loads(WEIGHTS_FILE.read_text(encoding="utf-8"))[profile]
     return Weights(p["bias"], p["weights"], p["threshold"])
 
 

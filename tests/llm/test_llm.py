@@ -289,21 +289,21 @@ def test_load_settings_reads_toml(tmp_path, monkeypatch):
     for v in ("SAIP_LLM_BASE_URL", "SAIP_LLM_MODEL", "SAIP_LLM_API_KEY"):
         monkeypatch.delenv(v, raising=False)
     path = tmp_path / "private.toml"
-    path.write_text('[llm]\nbase_url = "http://h:8000/v1"\nmodel = "m"\nsamples = 12\n[gate]\nc0 = 2.0\n')
+    path.write_text('[llm]\nbase_url = "http://h:8000/v1"\nmodel = "m"\nsamples = 12\n[gate]\nc0 = 2.0\n', encoding="utf-8")
     s = load_settings(path)
     assert (s.llm.base_url, s.llm.model, s.llm.samples, s.gate.c0) == ("http://h:8000/v1", "m", 12, 2.0)
 
 
 def test_load_settings_rejects_unknown_keys(tmp_path):
     path = tmp_path / "private.toml"
-    path.write_text("[llm]\nbogus = 1\n")
+    path.write_text("[llm]\nbogus = 1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="bogus"):
         load_settings(path)
 
 
 def test_environment_overrides_the_file(tmp_path, monkeypatch):
     path = tmp_path / "private.toml"
-    path.write_text('[llm]\nmodel = "from-file"\n')
+    path.write_text('[llm]\nmodel = "from-file"\n', encoding="utf-8")
     monkeypatch.setenv("SAIP_LLM_MODEL", "from-env")
     assert load_settings(path).llm.model == "from-env"
 
@@ -329,7 +329,7 @@ def test_replay_runs_end_to_end_on_a_generated_day(tmp_path):
     from synth.writer import write_day
 
     write_day(generate_day(1001, date(2026, 11, 4), user=1), tmp_path / "user01" / "day01")
-    (tmp_path / "index.json").write_text(json.dumps([dict(user=1, day=1, path="user01/day01")]))
+    (tmp_path / "index.json").write_text(json.dumps([dict(user=1, day=1, path="user01/day01")]), encoding="utf-8")
     rows = run_replay(MockClient(), Settings(), {"need": 1.0, "accept": 1.0}, tmp_path, [1], stride_s=300, max_assess=25)
     assert rows and all(r.action in ("speak", "wait", "quiet") for r in rows)
     assert all(0 <= r.p_need_raw <= 1 and 0 <= r.stuck_score <= 1 for r in rows)

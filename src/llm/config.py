@@ -97,7 +97,7 @@ def _section(cls, table: dict):
 
 def load_settings(path: str | Path | None = None) -> Settings:
     found = find_config(path)
-    data = tomllib.loads(found.read_text()) if found else {}
+    data = tomllib.loads(found.read_text(encoding="utf-8")) if found else {}
     llm = _section(LLMConfig, data.get("llm", {}))
     gate = _section(GateParams, data.get("gate", {}))
     agent = _section(AgentConfig, data.get("agent", {}))

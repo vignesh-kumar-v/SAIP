@@ -54,7 +54,7 @@ def is_set_up() -> bool:
 def load_manifest() -> dict:
     """Everything setup changed, so uninstall can put it all back. Lives in the setup marker file."""
     try:
-        return json.loads(marker_path().read_text())
+        return json.loads(marker_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
@@ -73,7 +73,7 @@ def record_decisions(accept=(), decline=(), forget=()) -> None:
     dec = (dec | decline) - accept - forget
     m["accepted_repos"], m["declined_repos"] = sorted(acc), sorted(dec)
     marker_path().parent.mkdir(parents=True, exist_ok=True)
-    marker_path().write_text(json.dumps(m, indent=2))
+    marker_path().write_text(json.dumps(m, indent=2), encoding="utf-8")
 
 
 def update_manifest(**new) -> None:
@@ -88,13 +88,13 @@ def update_manifest(**new) -> None:
         else:
             cur[key] = value
     marker_path().parent.mkdir(parents=True, exist_ok=True)
-    marker_path().write_text(json.dumps(cur, indent=2))
+    marker_path().write_text(json.dumps(cur, indent=2), encoding="utf-8")
 
 
 def default_config_path() -> Path:
     """Next to the code when run from a checkout (the file is gitignored), else in the per-user config folder."""
     pyproject = Path.cwd() / "pyproject.toml"
-    if pyproject.exists() and 'name = "saip"' in pyproject.read_text():
+    if pyproject.exists() and 'name = "saip"' in pyproject.read_text(encoding="utf-8"):
         return Path.cwd() / "private.toml"
     return user_config_dir() / "private.toml"
 
@@ -161,7 +161,7 @@ def run_setup(plat: Platform, aw: ActivityWatch, *, yes: bool = False, ask: Call
             model = ask("Model name (Enter to fill in later): ").strip()
         target.parent.mkdir(parents=True, exist_ok=True)
         created_config = str(target)
-        target.write_text(TEMPLATE.format(base_url=_toml(base_url), model=_toml(model), roots=_toml(roots or [])))
+        target.write_text(TEMPLATE.format(base_url=_toml(base_url), model=_toml(model), roots=_toml(roots or [])), encoding="utf-8")
         detail = f"wrote {target}" + ("" if base_url and model else "; fill in [llm] base_url and model before using the LLM")
         add(Result("config", "changed", detail))
 

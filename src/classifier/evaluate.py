@@ -41,7 +41,7 @@ def _epoch(ts: str) -> float:
 def load_day(day_dir: Path, user: int, use_hooks: bool, window_s: float) -> tuple[Day, str]:
     series = compute_features(load_export(day_dir / "aw-export.json"), window_s)
     profile = profile_for(series, use_hooks)
-    labels = [json.loads(x) for x in (day_dir / "labels.jsonl").read_text().splitlines()]
+    labels = [json.loads(x) for x in (day_dir / "labels.jsonl").read_text(encoding="utf-8").splitlines()]
     n = len(series.times)
     state, subtype = np.full(n, "none", dtype=object), np.full(n, "none", dtype=object)
     ai_loop = np.zeros(n, dtype=bool)
@@ -61,7 +61,7 @@ def load_day(day_dir: Path, user: int, use_hooks: bool, window_s: float) -> tupl
 
 def load_days(data: Path, users, use_hooks: bool, window_s: float) -> tuple[list, str]:
     days, profile = [], ""
-    for rec in json.loads((data / "index.json").read_text()):
+    for rec in json.loads((data / "index.json").read_text(encoding="utf-8")):
         if rec["user"] in users:
             day, profile = load_day(data / rec["path"], rec["user"], use_hooks, window_s)
             days.append(day)

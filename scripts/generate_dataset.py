@@ -28,7 +28,7 @@ def workdays(start: date, n: int):
 
 
 def rows(path: Path) -> list:
-    return [json.loads(x) for x in path.read_text().splitlines()]
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
 
 
 def generate(out: Path, users: int, days: int, start: date) -> list:
@@ -39,7 +39,7 @@ def generate(out: Path, users: int, days: int, start: date) -> list:
             path = out / f"user{u:02d}" / f"day{k:02d}"
             write_day(generate_day(seed, day, user=u), path)
             index.append(dict(user=u, day=k, date=day.isoformat(), seed=seed, path=path.relative_to(out).as_posix()))
-    (out / "index.json").write_text(json.dumps(index, indent=2))
+    (out / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
     return index
 
 
@@ -51,7 +51,7 @@ def check(out: Path, index: list) -> list:
     styles = {}
     for rec in index:
         d = out / rec["path"]
-        m = json.loads((d / "manifest.json").read_text())
+        m = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
         missing = [n for n in need if not (d / f"{n}.jsonl").exists()]
         if missing or not (d / "aw-export.json").exists():
             problems.append((rec["path"], "missing files", missing))
@@ -67,7 +67,7 @@ def check(out: Path, index: list) -> list:
             minutes[x["state"]] += x["duration_s"] / 60
         for h in rows(d / "help_requests.jsonl"):
             helps[h["kind"]] += 1
-        for b in json.loads((d / "aw-export.json").read_text())["buckets"].values():
+        for b in json.loads((d / "aw-export.json").read_text(encoding="utf-8"))["buckets"].values():
             e = b["events"]
             if len(e) > 1 and t(e[0]["timestamp"]) < t(e[-1]["timestamp"]):
                 problems.append((rec["path"], "export not newest first", b["id"]))

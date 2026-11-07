@@ -16,7 +16,7 @@ from .generator import BUCKETS, HOST
 
 
 def _jsonl(path: Path, rows) -> None:
-    with path.open("w") as f:
+    with path.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
@@ -41,6 +41,6 @@ def write_day(result: dict, outdir: str | Path) -> Path:
     manifest["buckets"] = {k: v[0] for k, v in BUCKETS.items()}
     manifest["note"] = ("Synthetic. For pipeline development and tests only; "
                         "not valid evidence of real-world classifier accuracy.")
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    (out / "aw-export.json").write_text(json.dumps({"buckets": export}, ensure_ascii=False))
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (out / "aw-export.json").write_text(json.dumps({"buckets": export}, ensure_ascii=False), encoding="utf-8")
     return out

@@ -201,11 +201,11 @@ def test_declining_the_uninstall_prompt_changes_nothing(sandbox):
 
 def test_uninstall_keeps_a_config_that_existed_before_setup(sandbox):
     mine = sandbox / "private.toml"
-    mine.write_text('[llm]\nmodel = "mine"\n')
+    mine.write_text('[llm]\nmodel = "mine"\n', encoding="utf-8")
     plat = FakePlatform(sandbox / ".zshrc")
     run_setup(plat, FakeAW(), yes=True, out=quiet)
     uninstall(plat, FakeAW(), yes=True, out=quiet)
-    assert mine.read_text() == '[llm]\nmodel = "mine"\n'
+    assert mine.read_text(encoding="utf-8") == '[llm]\nmodel = "mine"\n'
 
 
 def test_keep_config_flag_keeps_what_setup_wrote(sandbox):
@@ -311,7 +311,7 @@ def test_doctor_reports_hook_state_without_changing_anything(sandbox):
 
 def day_aw(tmp_path):
     write_day(generate_day(1001, date(2026, 11, 4), user=1), tmp_path / "day")
-    export = json.loads((tmp_path / "day" / "aw-export.json").read_text())["buckets"]
+    export = json.loads((tmp_path / "day" / "aw-export.json").read_text(encoding="utf-8"))["buckets"]
     buckets = {bid: {"type": b["type"]} for bid, b in export.items()}
     events = {bid: b["events"] for bid, b in export.items()}
     end = max(datetime.fromisoformat(e["timestamp"]).timestamp() + e["duration"] for e in events[next(iter(events))])

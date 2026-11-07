@@ -597,14 +597,14 @@ def test_categories_for_real_world_apps():
 def test_writer_roundtrip(tmp_path, days):
     out = write_day(days[1], tmp_path / "d")
     for name in ["window", "afk", "input", "labels"]:
-        rows = [json.loads(line) for line in (out / f"{name}.jsonl").read_text().splitlines()]
+        rows = [json.loads(line) for line in (out / f"{name}.jsonl").read_text(encoding="utf-8").splitlines()]
         assert rows
     for name in ["web", "terminal", "fs"]:               # may be empty: a Safari user, or a day of writing
         assert (out / f"{name}.jsonl").exists()
     assert (out / "help_requests.jsonl").exists()        # may be empty: some days nobody opens a chatbot
-    manifest = json.loads((out / "manifest.json").read_text())
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["seed"] == 1 and "Synthetic" in manifest["note"]
-    export = json.loads((out / "aw-export.json").read_text())
+    export = json.loads((out / "aw-export.json").read_text(encoding="utf-8"))
     from synth.generator import HOST
     names = ["window", "afk", "input", "web-chrome", "terminal", "fs"]
     assert set(export["buckets"]) == {f"aw-watcher-{k}_{HOST}" for k in names}

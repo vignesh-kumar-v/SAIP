@@ -173,22 +173,22 @@ def test_worktrees_use_the_right_hooks_folder(tmp_path):
 
 def test_set_config_list_replaces_inserts_and_keeps_everything_else(tmp_path):
     cfg = tmp_path / "private.toml"
-    cfg.write_text('[llm]\nmodel = "m"   # keep me\n\n[agent]\nwatch_roots = ["~/old"]\ncooldown_s = 100\n')
+    cfg.write_text('[llm]\nmodel = "m"   # keep me\n\n[agent]\nwatch_roots = ["~/old"]\ncooldown_s = 100\n', encoding="utf-8")
     set_config_list(cfg, "agent", "watch_roots", ["~/new", "/x y"])
     set_config_list(cfg, "agent", "exclude", ["~/skip"])
-    text = cfg.read_text()
+    text = cfg.read_text(encoding="utf-8")
     assert 'watch_roots = ["~/new", "/x y"]' in text and 'exclude = ["~/skip"]' in text
     assert 'model = "m"   # keep me' in text and "cooldown_s = 100" in text and "~/old" not in text
-    import tomllib
+    from llm.config import tomllib
     assert tomllib.loads(text)["agent"]["watch_roots"] == ["~/new", "/x y"]
 
 
 def test_set_config_list_creates_the_section_when_missing(tmp_path):
     cfg = tmp_path / "private.toml"
-    cfg.write_text('[llm]\nmodel = "m"\n')
+    cfg.write_text('[llm]\nmodel = "m"\n', encoding="utf-8")
     set_config_list(cfg, "agent", "watch_roots", ["~/code"])
-    import tomllib
-    assert tomllib.loads(cfg.read_text()) == {"llm": {"model": "m"}, "agent": {"watch_roots": ["~/code"]}}
+    from llm.config import tomllib
+    assert tomllib.loads(cfg.read_text(encoding="utf-8")) == {"llm": {"model": "m"}, "agent": {"watch_roots": ["~/code"]}}
 
 
 # ---- a real commit reaches ActivityWatcher -------------------------------------------------------

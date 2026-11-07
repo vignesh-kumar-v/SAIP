@@ -92,10 +92,10 @@ def load_temperatures(path: str | Path) -> dict:
     path = Path(path)
     if not path.is_file():
         return {"need": 1.0, "accept": 1.0}
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return {"need": float(data.get("need", 1.0)), "accept": float(data.get("accept", 1.0))}
 
 
 def save_temperatures(path: str | Path, temps: dict) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(temps, indent=2))
+    Path(path).write_text(json.dumps(temps, indent=2), encoding="utf-8")

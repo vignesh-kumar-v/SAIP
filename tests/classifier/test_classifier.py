@@ -62,7 +62,7 @@ def test_loader_merges_hostnames_sorts_and_ignores_web(tmp_path):
         "e": bucket("old", "web.tab.current", [dict(timestamp="2026-11-04T10:00:00+00:00", duration=5.0, data={})]),
     })
     path = tmp_path / "export.json"
-    path.write_text(json.dumps(export))
+    path.write_text(json.dumps(export), encoding="utf-8")
     t = load_export(path)
     times = [e["t"] for e in t.streams["window"]]
     assert times == sorted(times) and len(times) == 3
@@ -71,7 +71,7 @@ def test_loader_merges_hostnames_sorts_and_ignores_web(tmp_path):
 
 def test_loader_rejects_an_export_missing_a_required_stream(tmp_path):
     path = tmp_path / "export.json"
-    path.write_text(json.dumps(dict(buckets={})))
+    path.write_text(json.dumps(dict(buckets={})), encoding="utf-8")
     with pytest.raises(ValueError, match="window"):
         load_export(path)
 

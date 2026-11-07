@@ -66,7 +66,7 @@ class Row:
 
 def sample_ticks(data: Path, users, use_hooks: bool, stride_s: float, max_assess: int):
     """Yield (day, trace, tick index, trigger threshold) for ticks the classifier would hand to the LLM."""
-    index = json.loads((data / "index.json").read_text())
+    index = json.loads((data / "index.json").read_text(encoding="utf-8"))
     picks = []
     for rec in index:
         if rec["user"] not in users:
@@ -156,7 +156,7 @@ def report(rows: list[Row], settings: Settings, temps: dict) -> str:
 
 
 def write_rows(path: Path, rows: list[Row]) -> None:
-    path.write_text("".join(json.dumps(r.__dict__) + "\n" for r in rows))
+    path.write_text("".join(json.dumps(r.__dict__) + "\n" for r in rows), encoding="utf-8")
 
 
 __all__ = ["MockClient", "run_replay", "report", "fit_temps", "write_rows", "DEV_USERS", "TEST_USERS",

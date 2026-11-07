@@ -33,7 +33,7 @@ def cmd_score(args) -> None:
               f"{np.percentile(s, 90):.3f} {s.max():.3f}")
         print(f"above threshold {weights.threshold:.2f}: {(s >= weights.threshold).mean():.3f} of scored time")
     if args.out:
-        with open(args.out, "w") as f:
+        with open(args.out, "w", encoding="utf-8") as f:
             for i, t in enumerate(series.times.tolist()):
                 paused = series.pause[i] != SCORING
                 f.write(json.dumps(dict(

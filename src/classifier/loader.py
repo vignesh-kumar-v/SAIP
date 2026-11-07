@@ -33,7 +33,7 @@ def _epoch(ts: str) -> float:
 
 
 def load_export(path: str | Path) -> Trace:
-    buckets = json.loads(Path(path).read_text())["buckets"]
+    buckets = json.loads(Path(path).read_text(encoding="utf-8"))["buckets"]
     streams: dict[str, list] = {name: [] for name in STREAMS.values()}
     hooks = False
     for bucket in buckets.values():

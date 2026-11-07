@@ -134,7 +134,7 @@ def describe(states: list[RepoState]) -> list[str]:
 
 def set_config_list(path: Path, section: str, key: str, values: list[str]) -> None:
     """Set `key = [...]` inside `[section]`, keeping everything else in the file as it was."""
-    text = path.read_text() if path.exists() else ""
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
     line = f"{key} = {json.dumps(list(values))}"
     lines = text.split("\n")
     start = next((i for i, l in enumerate(lines) if l.strip() == f"[{section}]"), None)
@@ -148,7 +148,7 @@ def set_config_list(path: Path, section: str, key: str, values: list[str]) -> No
                 break
         else:
             lines.insert(start + 1, line)
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def with_roots(agent: AgentConfig, roots: list[str]) -> AgentConfig:
