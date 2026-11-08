@@ -82,6 +82,7 @@ One command sets everything up the first time and then watches your machine:
 pip install -e .
 saip run              # first run: set up, then watch and decide. Ctrl-C to stop.
 saip doctor           # check every moving part
+saip offers           # what happened to past offers: accepted, dismissed, ignored
 saip setup            # just the setup (safe to repeat)
 saip uninstall        # remove the shell hook (add --purge to delete private.toml too)
 ```
@@ -116,6 +117,25 @@ saip repo list                # each repo and whether its hook is working
 saip repo remove ~/Developer/old-project
 ```
 
+**Offers.** When the gate decides to speak, the model writes a one-line offer from the same behaviour summary
+(adapted from the prompt in [thunlp/ProactiveAgent](https://github.com/thunlp/ProactiveAgent)): it may say what
+pattern it noticed, and by default never what the problem is, because it does not see your work. A dialog shows it with
+**Help me / Not now**, with no default button so a stray Return cannot answer for you. As in that project, an offer
+ends as *accepted*, *dismissed* or *ignored* (no answer within `offer_timeout_s`, default 45 s). Ignoring stretches
+the quiet period after an offer by 1.5x and dismissing by 2x (up to 4x); accepting resets it. The last answer is also
+passed to the next offer's prompt. Every offer is appended to `offers.jsonl` in the settings folder: the gate's
+numbers, the offer text and the outcome, nothing about your windows or typing. `saip run --no-dialog` prints offers
+instead (`--notify` then shows a notification), and `saip offers` summarises the record.
+
+**Context from your screen (opt-in).** thunlp gets its context from raw window titles and typed keys. SAIP never logs
+keys. Instead, `include_titles = true` adds window titles, and `read_screen = true` (or `saip run --read-screen`) reads
+the text around your cursor in the front app only at the moment an offer is written, so the offer can say what you are
+actually working on. It refuses unless the model endpoint is on this machine, skips apps on the private list and
+password fields, masks keys and tokens, and keeps at most `screen_chars` (1200) characters. Pressing **Help me** then
+has the model write concrete help from the same text, shown in a dialog (with **Copy**); SAIP never types into your
+documents. On macOS the app running `saip` needs Accessibility (System Settings > Privacy & Security). Other systems
+do not read the screen yet.
+
 **Undoing it.** `saip uninstall` puts the machine back as it was before SAIP. Setup records every change it makes,
 and uninstall lists them, asks once, then reverses each: the shell block (and the profile file, if setup created
 it), every repo hook (an existing hook returns byte for byte), the buckets SAIP created in ActivityWatcher, the
@@ -129,7 +149,7 @@ and `--keep-config` / `--keep-command` keep the settings or the command.
 | Install ActivityWatcher | `brew install --cask` | `winget install` | link only |
 | Shell hook | zsh `~/.zshrc` | PowerShell `$PROFILE` | bash `~/.bashrc` |
 | Notification | `osascript` | toast | `notify-send` |
-| Add-this-repo dialog | `osascript` | message box | `zenity` (else terminal) |
+| Dialogs (new repo, offers) | `osascript` | message box | `zenity` (else terminal) |
 
 "Experimental" means the adapter follows the same interface and its logic is covered by tests with the OS
 calls faked, but it has not been run on a real machine yet. The CI matrix runs those tests on all three systems.

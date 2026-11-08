@@ -60,13 +60,20 @@ class Windows(Platform):
     def can_ask(self) -> bool:
         return shutil.which("powershell") is not None
 
-    def ask(self, title, message, buttons=("Never", "Not now", "Add")):
-        # Yes = Add, No = Not now, Cancel = Never (the message says so)
+    def ask(self, title, message, buttons=("Never", "Not now", "Add"), timeout=120, default=True):
+        # Two buttons map to Yes / No; three map to Yes = last, No = middle, Cancel = first. A message box has no
+        # time limit, so the call is cut off after `timeout` and counts as unanswered.
         esc = lambda t: t.replace("'", "''")
+        if len(buttons) == 2:
+            kind, mapping = "YesNo", {"Yes": buttons[1], "No": buttons[0]}
+            hint = f"Yes = {buttons[1]}   No = {buttons[0]}"
+        else:
+            kind, mapping = "YesNoCancel", {"Yes": buttons[-1], "No": buttons[1], "Cancel": buttons[0]}
+            hint = f"Yes = {buttons[-1]}   No = {buttons[1]}   Cancel = {buttons[0]}"
         script = ("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show("
-                  f"'{esc(message)}`n`nYes = Add   No = Not now   Cancel = Never','{esc(title)}','YesNoCancel')")
-        code, out = run(["powershell", "-NoProfile", "-Command", script], timeout=140)
-        return {"Yes": "Add", "No": "Not now", "Cancel": "Never"}.get(out.strip()) if code == 0 else None
+                  f"'{esc(message)}`n`n{esc(hint)}','{esc(title)}','{kind}')")
+        code, out = run(["powershell", "-NoProfile", "-Command", script], timeout=timeout + 20)
+        return mapping.get(out.strip()) if code == 0 else None
 
     def notify(self, title: str, message: str) -> bool:
         esc = lambda s: s.replace("'", "''")

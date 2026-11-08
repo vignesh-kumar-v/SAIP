@@ -15,3 +15,6 @@ labelled-awt-data/
 
 # Your endpoint details and API key
 private.toml
+
+# local reference clone of thunlp/ProactiveAgent (not part of this project)
+/ProactiveAgent/

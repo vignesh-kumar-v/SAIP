@@ -4,6 +4,7 @@
   saip setup      just the setup (safe to repeat)
   saip doctor     check every moving part and say what is wrong
   saip repo       add / list / remove the folders whose git repositories get the commit hook
+  saip offers     what happened to past offers (accepted, dismissed, ignored)
   saip uninstall  put the machine back exactly as it was before SAIP
 """
 from __future__ import annotations
@@ -19,8 +20,11 @@ from llm.calibration import load_temperatures
 from llm.client import LLMError, OpenAIChatClient
 from llm.config import load_settings, user_config_dir
 from llm.context import build_context
+from llm.helper import give_help
+from llm.proposal import FALLBACK, propose
 from llm.replay import MockClient
 
+from . import offers as offers_mod
 from . import prompts as repos_mod_prompts
 from . import repos as repos_mod
 from . import setup as setup_mod
@@ -28,6 +32,7 @@ from .agent import NotReady, Orchestrator, describe, fetch_trace, score_now
 from .aw import DEFAULT_URL, ActivityWatch, AWError
 from .hooks import githook
 from .platform import current
+from .screen import copy_to_clipboard, read_screen
 from .watchers import GitWatcher
 
 
@@ -107,6 +112,18 @@ def cmd_doctor(a) -> int:
     return 1 if any(r.status == "failed" for r in results) else 0
 
 
+def cmd_offers(a) -> int:
+    """saip offers: what happened to each offer (numbers and text only, nothing about your work)."""
+    rows = offers_mod.read_log()
+    print(offers_mod.summarise(rows))
+    for r in rows[-a.last:]:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r.get("time", 0)))
+        print(f"  {when}  {r.get('outcome', '?'):10s}  s={r.get('stuck_score', 0):.2f}  bar={r.get('bar', 0):.2f}  {r.get('task', '')}")
+    if rows:
+        print(f"log: {offers_mod.log_path()}")
+    return 0
+
+
 def _pip_uninstall() -> tuple[bool, str]:
     if sys.platform.startswith("win"):
         return False, "Windows cannot remove a running program; run it afterwards"
@@ -144,6 +161,41 @@ def cmd_run(a) -> int:
     prompter = repos_mod_prompts.RepoPrompter(plat, sys.executable, cfg.new_repos, accepted_now)
     prompter.start()
     orch = Orchestrator(cfg)
+
+    want_screen = a.read_screen or settings.llm.read_screen
+    seen = {"screen_warned": False}
+
+    def look():
+        """The text in front of the user, if reading it is on, allowed and possible."""
+        if not want_screen:
+            return None
+        screen = read_screen(plat, settings.llm.base_url, settings.llm.private_apps, settings.llm.screen_chars)
+        if screen is None and not seen["screen_warned"]:
+            seen["screen_warned"] = True
+            why = plat.screen_error or "nothing readable in the front app (or it is private, or the model is not local)"
+            print(f"{time.strftime('%H:%M:%S')}  screen text not used: {why}")
+        return screen
+
+    def help_out(offer):
+        """The user pressed Help me: write the concrete help, from fresh text when it can be read."""
+        screen = look() or seen.get("screen")
+        try:
+            text = give_help(client, offer.proposal.task, seen.get("context", ""), screen)
+        except LLMError as e:
+            print(f"{time.strftime('%H:%M:%S')}  could not write the help ({e})")
+            return
+        print(f"          help: {text}")
+        if presenter.dialog and plat.ask("SAIP", text, ("Close", "Copy"), timeout=180, default=False) == "Copy":
+            copy_to_clipboard(text)
+
+    def answered(offer, outcome):
+        orch.record_outcome(outcome)
+        if outcome != offers_mod.UNANSWERED:
+            extra = f" (quiet period x{orch.cooldown_mult:g})" if outcome != offers_mod.ACCEPTED else ""
+            print(f"{time.strftime('%H:%M:%S')}  offer {outcome}{extra}")
+        if outcome == offers_mod.ACCEPTED and client is not None:
+            help_out(offer)
+    presenter = offers_mod.OfferPresenter(plat, cfg.offer_timeout_s, use_dialog=not a.no_dialog, on_outcome=answered)
     print(f"Watching on {plat.name}. Mode: {mode}\nCtrl-C to stop.\n")
     last_status = 0.0
     try:
@@ -177,9 +229,9 @@ def cmd_run(a) -> int:
                 continue
             if client is not None:
                 def run_assess():
-                    ctx = build_context(trace, tick.time, settings.llm.lookback_s, settings.llm.include_titles,
-                                        settings.llm.private_apps)
-                    return assess(client, settings, temps, ctx, tick.stuck_score)
+                    seen["context"] = build_context(trace, tick.time, settings.llm.lookback_s,
+                                                    settings.llm.include_titles, settings.llm.private_apps)
+                    return assess(client, settings, temps, seen["context"], tick.stuck_score)
                 try:
                     ev = orch.step(now, tick, run_assess)
                 except LLMError as e:
@@ -189,9 +241,18 @@ def cmd_run(a) -> int:
                 if ev:
                     print(describe(now, tick, ev))
                     if ev.kind == "offer":
-                        print("          >>> Looks like you may be stuck. Want a hand?")
-                        if a.notify:
-                            plat.notify("SAIP", "Looks like you may be stuck. Want a hand?")
+                        proposal = FALLBACK
+                        seen["screen"] = look()
+                        if seen["screen"]:
+                            print(f"          (read {len(seen['screen'].text)} characters from {seen['screen'].app})")
+                        try:
+                            proposal = propose(client, seen["context"], orch.take_outcome(), screen=seen["screen"])
+                        except LLMError as e:
+                            print(f"{time.strftime('%H:%M:%S')}  could not write the offer ({e}); using the plain one")
+                        print(f"          >>> {proposal.message}")
+                        if not presenter.dialog and a.notify:
+                            plat.notify("SAIP", proposal.message)
+                        presenter.submit(offers_mod.make_offer(now, ev.assessment.decision, ev.assessment.resampled, proposal))
             if now - last_status >= 60:
                 state = f"paused ({tick.reason})" if tick.paused else "scoring"
                 print(f"{time.strftime('%H:%M:%S')}  status: {state}, stuck score {tick.stuck_score:.2f} "
@@ -200,6 +261,7 @@ def cmd_run(a) -> int:
             time.sleep(cfg.tick_s)
     except KeyboardInterrupt:
         prompter.stop()
+        presenter.stop()
         print("\nStopped.")
         return 0
 
@@ -215,7 +277,10 @@ def main(argv=None) -> int:
     r.add_argument("--no-setup", action="store_true", help="skip first-run setup and change nothing on this machine")
     r.add_argument("--trigger", type=float, help="testing: wake the LLM above this stuck score (0 = every assessment interval)")
     r.add_argument("--mock-llm", action="store_true", help="use a deterministic stand-in for the model")
-    r.add_argument("--notify", action="store_true", help="also show a system notification when it speaks")
+    r.add_argument("--notify", action="store_true", help="with --no-dialog, show a system notification when it speaks")
+    r.add_argument("--no-dialog", action="store_true", help="print offers instead of asking with a dialog (no accept/dismiss)")
+    r.add_argument("--read-screen", action="store_true",
+                   help="read the text near your cursor when writing an offer (model must be local; or set read_screen in private.toml)")
     r.add_argument("--config", help="path to private.toml")
     r.set_defaults(fn=cmd_run)
     s = sub.add_parser("setup", help="set everything up (safe to repeat)")
@@ -229,6 +294,9 @@ def main(argv=None) -> int:
     g.set_defaults(fn=cmd_repo)
     d = sub.add_parser("doctor", help="check every moving part")
     d.set_defaults(fn=cmd_doctor)
+    o = sub.add_parser("offers", help="show what happened to past offers")
+    o.add_argument("--last", type=int, default=10, help="how many recent offers to list")
+    o.set_defaults(fn=cmd_offers)
     u = sub.add_parser("uninstall", help="put the machine back as it was before SAIP")
     u.add_argument("--yes", action="store_true", help="do not ask before reverting")
     u.add_argument("--keep-config", action="store_true", help="keep private.toml and calibration.json")

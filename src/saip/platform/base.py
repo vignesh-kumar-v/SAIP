@@ -67,8 +67,23 @@ class Platform:
         """Whether this system can pop up a dialog with buttons (otherwise the question is asked in the terminal)."""
         return False
 
-    def ask(self, title: str, message: str, buttons: tuple = ("Never", "Not now", "Add")) -> str | None:
-        """Show a dialog and return the button pressed, or None if it timed out, was dismissed or is unsupported."""
+    def ask(self, title: str, message: str, buttons: tuple = ("Never", "Not now", "Add"), timeout: int = 120,
+            default: bool = True) -> str | None:
+        """Show a dialog and return the button pressed, or None if it timed out, was dismissed or is unsupported.
+
+        `buttons` run from the "no" side to the "yes" side. `default=False` leaves every button un-highlighted, so a
+        stray Return key from someone typing cannot answer for them.
+        """
+        return None
+
+    # ---- reading the screen ----
+    screen_error = ""            # why the last read_screen returned None, for the user
+
+    def read_screen(self) -> str | None:
+        """The front app's name, the cursor position and its focused text, as `app<<SAIP>>cursor<<SAIP>>text`.
+
+        None when this system cannot read it. Only called when the user has opted in (see saip/screen.py).
+        """
         return None
 
     # ---- notifications ----

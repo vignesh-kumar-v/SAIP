@@ -41,6 +41,8 @@ class LLMConfig:
     lookback_s: float = 300.0            # how much recent activity the model is shown
     include_titles: bool = False         # window titles stay on this machine unless you opt in
     private_apps: tuple = DEFAULT_PRIVATE_APPS
+    read_screen: bool = False            # read the focused text when an offer is written (local endpoint only)
+    screen_chars: int = 1200             # how much of it the model is shown
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,8 @@ class AgentConfig:
     tick_s: float = 5.0                  # how often the live loop re-reads ActivityWatcher
     history_min: float = 90.0            # how much history each tick re-scores (the EMA settles in about a minute)
     assess_interval_s: float = 30.0      # at most one LLM assessment per this long
-    cooldown_s: float = 300.0            # quiet period after an offer
+    cooldown_s: float = 300.0            # quiet period after an offer (stretched after ignored or dismissed ones)
+    offer_timeout_s: float = 45.0        # an offer dialog left unanswered this long counts as ignored
     pending_expiry_s: float = 600.0      # a deferred offer is dropped after this long
     break_idle_s: float = 5.0            # no input for this long counts as a natural break
     repos: tuple = ()                    # individual git repositories to hook

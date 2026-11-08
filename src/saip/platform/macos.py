@@ -10,6 +10,42 @@ PANES = {"Accessibility": "Privacy_Accessibility", "Input Monitoring": "Privacy_
          "Screen Recording": "Privacy_ScreenCapture"}
 
 
+def dialog_script(title: str, message: str, buttons: tuple, timeout: int, default: bool) -> str:
+    esc = lambda t: t.replace("\\", "\\\\").replace('"', '\\"')
+    labels = ", ".join(f'"{esc(b)}"' for b in buttons)
+    script = f'display dialog "{esc(message)}" with title "{esc(title)}" buttons {{{labels}}}'
+    if default:
+        script += f' default button "{esc(buttons[-1])}"'
+    return script + f" giving up after {int(timeout)}"
+
+
+# Needs Accessibility for the app that runs saip (Terminal, iTerm, ...): System Settings > Privacy & Security.
+READ_SCRIPT = """
+tell application "System Events"
+    set p to first application process whose frontmost is true
+    set pname to name of p
+    try
+        name of window 1 of p
+    on error
+        return "NO_ACCESS"
+    end try
+    set cur to 0
+    set txt to ""
+    try
+        set el to value of attribute "AXFocusedUIElement" of p
+        if (value of attribute "AXRole" of el) is "AXSecureTextField" then return pname & "<<SAIP>>0<<SAIP>>"
+        try
+            set txt to (value of attribute "AXValue" of el) as text
+        end try
+        try
+            set cur to item 1 of (value of attribute "AXSelectedTextRange" of el)
+        end try
+    end try
+    return pname & "<<SAIP>>" & cur & "<<SAIP>>" & txt
+end tell
+"""
+
+
 class MacOS(Platform):
     name = "macOS"
     level = "full"
@@ -59,16 +95,22 @@ class MacOS(Platform):
     def can_ask(self) -> bool:
         return True
 
-    def ask(self, title, message, buttons=("Never", "Not now", "Add")):
-        esc = lambda t: t.replace("\\", "\\\\").replace('"', '\\"')
-        labels = ", ".join(f'"{esc(b)}"' for b in buttons)
-        script = (f'display dialog "{esc(message)}" with title "{esc(title)}" buttons {{{labels}}} '
-                  f'default button "{esc(buttons[-1])}" giving up after 120')
-        code, out = run(["osascript", "-e", script], timeout=140)
+    def ask(self, title, message, buttons=("Never", "Not now", "Add"), timeout=120, default=True):
+        code, out = run(["osascript", "-e", dialog_script(title, message, buttons, timeout, default)],
+                        timeout=timeout + 20)
         if code != 0 or "gave up:true" in out:
             return None
         m = re.search(r"button returned:(.*?)(?:, gave up:|$)", out)
         return m.group(1).strip() if m and m.group(1).strip() in buttons else None
+
+    def read_screen(self):
+        code, out = run(["osascript", "-e", READ_SCRIPT], timeout=15)
+        if code != 0 or out == "NO_ACCESS":
+            self.screen_error = ("Accessibility is off for the app running saip. Turn it on for your terminal in "
+                                 "System Settings > Privacy & Security > Accessibility, then restart saip.")
+            return None
+        self.screen_error = ""
+        return out
 
     def notify(self, title: str, message: str) -> bool:
         esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')

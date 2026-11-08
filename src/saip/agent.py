@@ -7,7 +7,7 @@ settles within about a minute, far inside that history. The Orchestrator is a sm
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -22,6 +22,10 @@ from llm.gate import QUIET, SPEAK, WAIT, should_probe
 from .aw import ActivityWatch
 
 STALE_AFTER_S = 60.0         # if the newest tick is older than this, the machine is not reporting
+# How the quiet period after an offer stretches with the answer, as in thunlp/ProactiveAgent: ignoring means the user
+# is busy, dismissing means no, accepting means the offer was welcome. Capped so it can never go silent for good.
+COOLDOWN_FACTOR = {"ignored": 1.5, "dismissed": 2.0}
+MAX_COOLDOWN_MULT = 4.0
 
 
 class NotReady(RuntimeError):
@@ -93,7 +97,23 @@ class Orchestrator:
     last_offer: float = -1e18
     pending_since: float | None = None
     last_front: tuple | None = None
-    log: list = field(default_factory=list)
+    cooldown_mult: float = 1.0                    # grows after ignored or dismissed offers, resets on an accepted one
+    last_outcome: str | None = None               # the answer to the previous offer, until the next one uses it
+
+    def record_outcome(self, outcome: str) -> None:
+        """Learn from what the user did with the last offer."""
+        if outcome == "accepted":
+            self.cooldown_mult = 1.0
+        elif outcome in COOLDOWN_FACTOR:
+            self.cooldown_mult = min(self.cooldown_mult * COOLDOWN_FACTOR[outcome], MAX_COOLDOWN_MULT)
+        else:
+            return                                # "unanswered" (no dialog available) tells us nothing
+        self.last_outcome = outcome
+
+    def take_outcome(self) -> str | None:
+        """The previous offer's outcome, handed to the proposal prompt once and then forgotten."""
+        out, self.last_outcome = self.last_outcome, None
+        return out
 
     def is_break(self, tick: Tick, previous_front: tuple | None) -> bool:
         """A natural break: typing stopped for a few seconds, or the window in front changed."""
@@ -105,7 +125,7 @@ class Orchestrator:
         self.last_front = tick.front
         if tick.paused:
             return None
-        if now - self.last_offer < self.cfg.cooldown_s:
+        if now - self.last_offer < self.cfg.cooldown_s * self.cooldown_mult:
             return None
         if self.pending_since is not None and now - self.pending_since > self.cfg.pending_expiry_s:
             self.pending_since = None

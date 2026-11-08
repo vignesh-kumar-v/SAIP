@@ -370,6 +370,9 @@ def plan_uninstall(plat: Platform, aw: ActivityWatch, *, keep_config: bool = Fal
     cal = user_config_dir() / "calibration.json"
     if cal.exists() and not keep_config:
         to_delete.append(cal)
+    offers = user_config_dir() / "offers.jsonl"
+    if offers.exists() and not keep_config:
+        to_delete.append(offers)
     if to_delete:
         def undo_files() -> str:
             for f in to_delete:

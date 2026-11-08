@@ -215,6 +215,17 @@ def test_keep_config_flag_keeps_what_setup_wrote(sandbox):
     assert (sandbox / "cfg" / "private.toml").exists()
 
 
+def test_uninstall_deletes_the_offer_record_unless_config_is_kept(sandbox):
+    plat = FakePlatform(sandbox / ".zshrc")
+    run_setup(plat, FakeAW(), yes=True, out=quiet)
+    log = sandbox / "cfg" / "offers.jsonl"
+    log.write_text('{"outcome": "accepted"}\n', encoding="utf-8")
+    uninstall(plat, FakeAW(), yes=True, keep_config=True, out=quiet)
+    assert log.exists()
+    uninstall(plat, FakeAW(), yes=True, out=quiet)
+    assert not log.exists()
+
+
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 def test_uninstall_puts_everything_back_as_if_saip_never_existed(sandbox, monkeypatch):
     monkeypatch.setattr(setup_mod, "_wait_for", lambda check, seconds, step=1.0: True)

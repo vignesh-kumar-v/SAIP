@@ -29,12 +29,15 @@ class Linux(Platform):
     def can_ask(self) -> bool:
         return shutil.which("zenity") is not None
 
-    def ask(self, title, message, buttons=("Never", "Not now", "Add")):
-        code, out = run(["zenity", "--question", "--title", title, "--text", message, "--ok-label", buttons[-1],
-                         "--cancel-label", buttons[1], "--extra-button", buttons[0], "--timeout", "120"], timeout=140)
-        if out.strip() == buttons[0]:
+    def ask(self, title, message, buttons=("Never", "Not now", "Add"), timeout=120, default=True):
+        cmd = ["zenity", "--question", "--title", title, "--text", message, "--ok-label", buttons[-1],
+               "--cancel-label", buttons[1] if len(buttons) > 2 else buttons[0], "--timeout", str(int(timeout))]
+        if len(buttons) > 2:
+            cmd += ["--extra-button", buttons[0]]
+        code, out = run(cmd, timeout=timeout + 20)
+        if len(buttons) > 2 and out.strip() == buttons[0]:
             return buttons[0]
-        return {0: buttons[-1], 1: buttons[1]}.get(code)
+        return {0: buttons[-1], 1: buttons[1] if len(buttons) > 2 else buttons[0]}.get(code)
 
     def notify(self, title: str, message: str) -> bool:
         return shutil.which("notify-send") is not None and run(["notify-send", title, message], timeout=10)[0] == 0
