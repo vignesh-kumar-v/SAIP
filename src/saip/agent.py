@@ -61,13 +61,13 @@ class Tick:
     front: tuple | None          # identity of the window in front
 
 
-def score_now(trace: Trace, now: float) -> Tick:
+def score_now(trace: Trace, now: float, typed_text: str | None = None) -> Tick:
     """Score the newest tick for which every stream has reported.
 
     Watchers report a few seconds apart, so the very last tick can have input but no window yet, which would
     read as "no window" and pause scoring. Using the newest tick covered by the slowest stream avoids that.
     """
-    series = compute_features(trace)
+    series = compute_features(trace, typed_text=typed_text)
     weights = load_weights(profile_for(series))
     score = score_series(series, weights)
     sealed = min(max(e["t"] + e["duration"] for e in trace.streams["window"]),

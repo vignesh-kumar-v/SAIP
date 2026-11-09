@@ -28,6 +28,7 @@ from . import offers as offers_mod
 from . import prompts as repos_mod_prompts
 from . import repos as repos_mod
 from . import setup as setup_mod
+from . import typing_monitor as typing_monitor_mod
 from .agent import NotReady, Orchestrator, describe, fetch_trace, score_now
 from .aw import DEFAULT_URL, ActivityWatch, AWError
 from .hooks import githook
@@ -162,6 +163,14 @@ def cmd_run(a) -> int:
     prompter.start()
     orch = Orchestrator(cfg)
 
+    # Start the typing monitor (Tier 1 -- Linux + macOS)
+    monitor = typing_monitor_mod.TypingMonitor()
+    if getattr(settings.agent, "monitor_typed_content", False):
+        monitor.start()
+        print("Typing content monitoring enabled.", flush=True)
+    else:
+        print("Typing content monitoring disabled (enable with monitor_typed_content=true in private.toml).", flush=True)
+
     want_screen = a.read_screen or settings.llm.read_screen
     seen = {"screen_warned": False}
 
@@ -214,7 +223,8 @@ def cmd_run(a) -> int:
             git.poll(now)
             try:
                 trace = fetch_trace(aw, now, cfg.history_min * 60)
-                tick = score_now(trace, now)
+                typed_text = monitor.get_current_text() if monitor._running else None
+                tick = score_now(trace, now, typed_text=typed_text)
                 if a.trigger is not None:
                     tick.theta_trig = a.trigger                # testing: wake the LLM at this score instead
             except NotReady as e:
@@ -262,6 +272,7 @@ def cmd_run(a) -> int:
     except KeyboardInterrupt:
         prompter.stop()
         presenter.stop()
+        monitor.stop()
         print("\nStopped.")
         return 0
 

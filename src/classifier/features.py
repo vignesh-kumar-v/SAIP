@@ -150,7 +150,7 @@ def _rolling_mean(values: np.ndarray, covered: np.ndarray, bins: int) -> np.ndar
     return np.divide(v[i] - v[lo], c[i] - c[lo], out=np.zeros(len(values)), where=c[i] > c[lo])
 
 
-def compute_features(trace: Trace, window_s: float = DEFAULT_WINDOW_S) -> FeatureSeries:
+def compute_features(trace: Trace, window_s: float = DEFAULT_WINDOW_S, typed_text: str | None = None) -> FeatureSeries:
     window, afk, inp = trace.streams["window"], trace.streams["afk"], trace.streams["input"]
     t0 = np.floor(min(window[0]["t"], inp[0]["t"]) / TICK_S) * TICK_S
     end = max(window[-1]["t"] + window[-1]["duration"], inp[-1]["t"] + inp[-1]["duration"])
@@ -216,5 +216,6 @@ def compute_features(trace: Trace, window_s: float = DEFAULT_WINDOW_S) -> Featur
         failures=np.clip(_per_min(failures, times, fail_window) / FULL_FAILURES_PER_MIN, 0, 1),
         repeats=np.clip(_per_min(repeats, times, fail_window) / FULL_REPEATS_PER_MIN, 0, 1),
         progress=np.clip(_per_min(commits, times, PROGRESS_WINDOW_S) * PROGRESS_WINDOW_S / 60.0, 0, 1),
+        typed_text=typed_text or None,
     )
     return FeatureSeries(times, values, pause, trace.hooks)

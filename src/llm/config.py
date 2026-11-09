@@ -70,6 +70,7 @@ class AgentConfig:
     exclude: tuple = ()                  # folders (or repos) never to hook
     rescan_s: float = 300.0              # how often `saip run` looks for new repositories under the roots
     new_repos: str = "ask"               # what to do with a repository that appears later: ask, add, or ignore
+    monitor_typed_content: bool = False  # enable global keystroke monitoring (Tier 1 -- Linux + macOS)
 
 
 @dataclass(frozen=True)
