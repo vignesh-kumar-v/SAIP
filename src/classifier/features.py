@@ -173,9 +173,20 @@ def compute_features(trace: Trace, window_s: float = DEFAULT_WINDOW_S, typed_tex
 
     # --- what is in front at each tick
     starts = np.array([e["t"] for e in window])
-    ends = np.maximum.accumulate(np.array([e["t"] + e["duration"] for e in window]))
+    ends = np.array([e["t"] + e["duration"] for e in window])
     idx = np.searchsorted(starts, times, "right") - 1
-    has_window = (idx >= 0) & (times <= ends[np.clip(idx, 0, None)] + WINDOW_GAP_S)
+    # For each tick, determine if a window covers it
+    # A window covers a tick if the tick time falls within [window_start, window_end + WINDOW_GAP_S]
+    has_window = np.zeros(len(times), dtype=bool)
+    valid = idx >= 0
+    for i in np.flatnonzero(valid):
+        tick_idx = np.argmin(np.abs(times - times[i]))  # find closest tick index
+        # Check if this tick falls within the window event at idx[i]
+        window_start = starts[idx[i]]
+        window_end = ends[idx[i]]
+        has_window[i] = times[i] >= window_start - WINDOW_GAP_S and times[i] <= window_end + WINDOW_GAP_S
+    # Remaining ticks without a matching window event have has_window=False
+    # This handles the case where the watcher stopped reporting or switched windows
     cats = np.array([category(e["data"]) for e in window])
     front = np.where(has_window, cats[np.clip(idx, 0, None)], "none")
     on_work = np.isin(front, list(WORK_SURFACES))
@@ -216,6 +227,8 @@ def compute_features(trace: Trace, window_s: float = DEFAULT_WINDOW_S, typed_tex
         failures=np.clip(_per_min(failures, times, fail_window) / FULL_FAILURES_PER_MIN, 0, 1),
         repeats=np.clip(_per_min(repeats, times, fail_window) / FULL_REPEATS_PER_MIN, 0, 1),
         progress=np.clip(_per_min(commits, times, PROGRESS_WINDOW_S) * PROGRESS_WINDOW_S / 60.0, 0, 1),
-        typed_text=typed_text or None,
     )
+    # Only add typed_text to values when it's a non-empty string
+    if typed_text:
+        values["typed_text"] = typed_text
     return FeatureSeries(times, values, pause, trace.hooks)
