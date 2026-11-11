@@ -271,6 +271,10 @@ def check_data(plat: Platform, aw: ActivityWatch, now: float | None = None) -> l
         results.append(Result("input watcher", "failed", "no aw-watcher-input bucket: enable it in ActivityWatch (key and click counts only)"))
     else:
         rows = recent(input_ids, 10)
+        if not rows:                               # the bucket is there from an earlier day but nothing fills it now
+            results.append(Result("input watcher", "failed", "aw-watcher-input has stopped: no events in 10 minutes. Start it "
+                                  "from the ActivityWatch tray icon (Modules > aw-watcher-input); it does not start by itself"))
+            return results
         busy = any(any(e["data"].get(k, 0) for k in ("presses", "clicks", "scrollX", "scrollY")) for e in rows)
         results.append(Result("input watcher", "ok" if busy else "needs-you",
                               "counts arriving" if busy else "only zeros in 10 minutes (idle, or missing permission). " + plat.permission_hint()))

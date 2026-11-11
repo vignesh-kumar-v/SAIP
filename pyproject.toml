@@ -11,6 +11,7 @@ dependencies = ["numpy>=1.26", "tomli>=2; python_version < '3.11'"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+tray = ["pystray>=0.19", "pillow>=9"]
 
 [project.scripts]
 saip = "saip.cli:main"
@@ -21,3 +22,4 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 classifier = ["weights.json"]
+saip = ["ui/*.html"]
