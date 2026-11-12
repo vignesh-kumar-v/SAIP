@@ -14,6 +14,10 @@ from .server import Api, ApiError
 
 DEMO_APPS = ["Code", "Google Chrome", "Terminal", "Slack", "Notion", "Preview", "Microsoft Word", "1Password 7",
              "Messages", "Mail", "Safari", "Figma", "Zoom", "Spotify", "Signal", "Firefox", "Xcode", "Finder"]
+DEMO_TOOLS = ["read_file", "git_log", "git_diff", "read_screen", "activity_summary", "web_search", "fetch_page",
+              "write_file", "copy_to_clipboard"]
+DEMO_PATH = "~/Developer/demo/notes.md"
+DEMO_NOTES = "# Notes\n\n- Write down what you expected to happen.\n- Write down what happened instead.\n- Try the smallest change.\n"
 FEATURES = {"circling": 8.0, "revisits": 1.5, "toggling": 0.5, "stalling": 0.4, "reaching": -0.5, "typing": 0.0,
             "ai_share": -1.0}
 
@@ -51,7 +55,8 @@ class DemoApi(Api):
         self.cfg = {"llm": {"base_url": "" if fresh else "http://demo:8000/v1", "model": "" if fresh else "demo-model",
                             "api_key_set": False, "timeout_s": 30.0, "samples": 10, "sample_temperature": 0.7,
                             "lookback_s": 300.0, "include_titles": True, "private_apps": self.blocked,
-                            "read_screen": True, "screen_chars": 1200, "reasoning_effort": ""},
+                            "read_screen": True, "screen_chars": 1200, "reasoning_effort": "", "chat_tools": True,
+                            "web_search": True, "search_provider": "", "search_api_key_set": False},
                     "gate": {"c0": 1.0, "m0": 2.0, "alpha": 1.0986, "beta": 0.6931, "delta": 0.1, "theta_flow": 0.5,
                              "eps": 0.001},
                     "agent": {"tick_s": 5.0, "history_min": 90.0, "assess_interval_s": 30.0, "cooldown_s": 300.0,
@@ -145,16 +150,74 @@ class DemoApi(Api):
     def autostart(self) -> dict:
         return {"enabled": self.auto, "where": "~/Library/LaunchAgents/dev.saip.agent.plist (demo)"}
 
+    def _tool_names(self) -> list[str]:
+        return list(DEMO_TOOLS)
+
+    def _undo_write(self, undo):
+        return True, "Demo: nothing to undo on disk."
+
+    def _scripted(self, text: str) -> tuple[list, dict | None, str]:
+        """(tool events, pending action, words) for what the person wrote."""
+        low = text.lower()
+        if "file" in low or "write" in low:
+            args = {"path": DEMO_PATH, "content": DEMO_NOTES}
+            preview = {"title": f"Write {DEMO_PATH}", "path": DEMO_PATH, "exists": False, "content": DEMO_NOTES, "diff": None}
+            return ([{"name": "read_file", "arguments": {"path": "notes/todo.md"}, "label": "Read notes/todo.md", "ok": True}],
+                    {"call_id": "demo-write", "name": "write_file", "arguments": args, "preview": preview},
+                    "I've drafted the file. Approve it and I'll save it.")
+        if "search" in low:
+            label = f"Searched the web: {text[:80]}"
+            return ([{"name": "web_search", "arguments": {"query": text}, "label": label, "ok": True}], None,
+                    "In the demo the search is made up, but this is where the sources would be summed up in a sentence or two.")
+        if "copy" in low:
+            args = {"text": "The gap between what you expected and what happened is the next step."}
+            preview = {"title": "Copy to clipboard", "path": None, "exists": False, "content": args["text"], "diff": None}
+            return [], {"call_id": "demo-copy", "name": "copy_to_clipboard", "arguments": args, "preview": preview}, \
+                "Here is a line you could keep. Approve it and I'll copy it."
+        return [], None, ("In the demo I can't read your work, but here's how I'd start: say in one sentence what you "
+                          "expected to happen, then what happened instead. The gap between the two is usually the next step.")
+
     def chat_send(self, cid, message):
-        c = self.runtime.chats
-        if c.get(cid) is None:
+        from .chats import Chats
+        chats = self.runtime.chats
+        c = chats.get(cid)
+        if c is None:
             raise ApiError(404, "no such conversation")
-        if not str(message).strip():
+        text = str(message).strip()
+        if not text:
             raise ApiError(400, "write a message first")
-        time.sleep(0.8)
-        c.add(cid, "user", str(message).strip())
-        c.add(cid, "assistant", "In the demo I can't read your work, but here's how I'd start: say in one sentence what you "
-                                "expected to happen, then what happened instead. The gap between the two is usually the next step.")
+        if Chats.pending(c):
+            raise ApiError(409, "approve or decline the proposed action first")
+        time.sleep(0.6)
+        events, pending, words = self._scripted(text)
+        wire = list(c["wire"])
+        start = len(wire)
+        wire.append({"role": "user", "content": text})
+        if not pending:
+            wire.append({"role": "assistant", "content": words})
+        self._record(cid, wire, start, [{"kind": "user", "text": text}],
+                     {"events": events, "pending": pending, "text": words})
+        return self.chat_get(cid)
+
+    def chat_action(self, cid, item_id, approve):
+        chats = self.runtime.chats
+        c = chats.get(cid)
+        item = None if c is None else next((i for i in c["items"] if i["id"] == item_id and i["kind"] == "action"), None)
+        if item is None:
+            raise ApiError(404, "no such action")
+        if not chats.claim_action(cid, item_id):
+            raise ApiError(409, "that action was already decided")
+        time.sleep(0.6)
+        if approve:
+            undo = {"path": item["action"]["path"], "existed": False, "demo": True} if item["action"]["name"] == "write_file" else None
+            chats.set_action(cid, item_id, "approved", "Demo: nothing was written.", undo)
+            result, words = "Done: Demo: nothing was written.", "Done. In the demo nothing was written; with a model connected it would be saved."
+        else:
+            chats.set_action(cid, item_id, "declined")
+            result, words = "The person declined this action.", "Okay, I won't do that."
+        wire = c["wire"] + [{"role": "tool", "tool_call_id": item["_call"], "content": result},
+                            {"role": "assistant", "content": words}]
+        self._record(cid, wire, None, [], {"events": [], "pending": None, "text": words})
         return self.chat_get(cid)
 
     # ---- changing (in memory only) ----
@@ -163,9 +226,9 @@ class DemoApi(Api):
             if section not in ("llm", "agent", "gate") or not isinstance(table, dict):
                 raise ApiError(400, f"unknown section [{section}]")
             for k, v in table.items():
-                if k == "api_key":
+                if k in ("api_key", "search_api_key"):
                     if v:
-                        self.cfg["llm"]["api_key_set"] = True
+                        self.cfg["llm"][f"{k}_set"] = True
                     continue
                 if k not in self.cfg[section]:
                     raise ApiError(400, f"unknown setting '{k}' in [{section}]")

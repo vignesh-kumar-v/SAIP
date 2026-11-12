@@ -403,14 +403,13 @@ def test_the_prompts_say_the_excerpt_is_a_window():
 
 
 def test_conversations_start_after_help_and_the_model_answers(sandbox):
-    from llm.client import Choice
     from saip.chats import Chats
     seen = {}
 
     class Model:
-        def complete(self, messages, *, max_tokens=1, temperature=0.0, **_):
-            seen["messages"] = messages
-            return [Choice("Try naming the one thing you expected.", finish_reason="stop")]
+        def chat(self, messages, tools=None, **_):
+            seen["messages"] = list(messages)
+            return {"content": "Try naming the one thing you expected.", "tool_calls": []}
 
     fresh = {"text": "Activity: 3 switches, just now."}
     rt = type("RT", (), {"chats": Chats(), "client": Model(), "last_context": "Activity: 14 switches.",

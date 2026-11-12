@@ -8,7 +8,9 @@ Reading
     GET  /api/decisions        every gate decision (decisions.jsonl)
     GET  /api/export           ?what=offers|decisions&format=csv|jsonl, as a download
     GET  /api/inspector        the last model checks: the exact context sent, the answers, the offer (memory only)
-    GET  /api/chats            the conversations of this run; GET /api/chats/<id> one of them with its messages
+    GET  /api/chats            the conversations of this run; GET /api/chats/<id> one of them: its items (what was said,
+                               the tools used, the actions proposed) and the tools the model has
+    GET  /api/chats/<id>/rewind?item=<n>  what going back to the message n would undo and drop
     GET  /api/health           what `saip doctor` checks, as rows
     GET  /api/settings         private.toml as the page may see it (the API key only as set / not set)
     GET  /api/apps             installed apps (marked if ActivityWatch has seen them), with the block list
@@ -17,6 +19,9 @@ Reading
 Changing
     POST /api/asks/<id>        {"button": "Help me"} answers an open question
     POST /api/chats            {"title"?} starts a conversation; POST /api/chats/<id> {"message"} sends one and returns the reply
+    POST /api/chats/<id>/actions/<item> {"approve": true|false} decides a proposed action; the model then carries on
+    POST /api/chats/<id>/rewind {"item", "message"?} goes back to one of your messages (undoing files), optionally
+                               replacing it with a new one
     POST /api/pause            {"minutes": 60} holds new offers back; {"minutes": 0} lets them through again
     POST /api/settings         {"llm": {...}, "agent": {...}, "gate": {...}} writes private.toml and reloads the agent
     POST /api/setup/aw         {"action": "install" | "start"}
@@ -189,12 +194,32 @@ class Api:
         rt = self.runtime
         return {"chats": self._chats().listing(), "available": bool(rt and getattr(rt, "client", None))}
 
+    def _tool_names(self) -> list[str]:
+        if getattr(self.runtime, "client", None) is None:
+            return []
+        try:
+            return [] if getattr(self.runtime, "tools_unsupported", False) else self._toolbox().names
+        except Exception:
+            return []
+
+    def _toolbox(self):
+        from llm.config import load_settings
+        from .chat_tools import Toolbox
+        settings = load_settings(getattr(getattr(self.runtime, "opts", None), "config", None))
+        toolbox = Toolbox(settings, self.runtime, self.plat)
+        if getattr(self.runtime, "tools_unsupported", False):       # this endpoint refused tools once: do not offer any
+            toolbox.names = []
+        return toolbox
+
+    def _view(self, c: dict) -> dict:
+        from .chats import Chats
+        return {**Chats.view(c), "tools": self._tool_names()}
+
     def chat_get(self, cid: int) -> dict:
         c = self._chats().get(cid)
         if c is None:
             raise ApiError(404, "no such conversation")
-        from .chats import Chats
-        return Chats.view(c)
+        return self._view(c)
 
     def chat_new(self, title: str | None = None) -> dict:
         rt = self._chats() and self.runtime
@@ -207,30 +232,131 @@ class Api:
         cid = rt.chats.create(title or "New chat", rt.snapshot_context() or rt.last_context, screen, live=True)
         return self.chat_get(cid)
 
+    def _record(self, cid: int, wire: list, start: int | None, lead: list, out: dict) -> None:
+        """Store what a model turn produced: its tool uses, a proposed action, its words."""
+        items = list(lead)
+        for e in out["events"]:
+            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"]}})
+        p = out["pending"]
+        if p:
+            pv = p["preview"]
+            items.append({"kind": "action", "text": pv.get("title") or p["name"], "_call": p["call_id"], "_args": p["arguments"],
+                          "action": {"name": p["name"], "title": pv.get("title") or p["name"], "path": pv.get("path"),
+                                     "content": pv.get("content"), "diff": pv.get("diff"), "exists": bool(pv.get("exists")),
+                                     "state": "pending", "detail": None}})
+        if out["text"]:
+            items.append({"kind": "assistant", "text": out["text"]})
+        elif not p:
+            items.append({"kind": "assistant", "text": "I could not write a reply this time. Try again."})
+        self.runtime.chats.record(cid, wire, items, start)
+
+    def _turn(self, cid: int, wire: list, toolbox) -> dict:
+        from llm.chat import chat_turn
+        out = chat_turn(self.runtime.client, wire, toolbox.schemas(), toolbox.run)
+        if out["tools_unsupported"]:
+            try:
+                self.runtime.tools_unsupported = True
+            except AttributeError:
+                pass
+        return out
+
     def chat_send(self, cid: int, message: str) -> dict:
-        from llm.chat import chat_reply
+        from llm.chat import base_messages
         from llm.client import LLMError
+        from .chats import MAX_MESSAGE, Chats
         chats, rt = self._chats(), self.runtime
         c = chats.get(cid)
         if c is None:
             raise ApiError(404, "no such conversation")
-        text = str(message).strip()
+        text = str(message).strip()[:MAX_MESSAGE]
         if not text:
             raise ApiError(400, "write a message first")
         if getattr(rt, "client", None) is None:
             raise ApiError(409, "no model is connected: the agent is stopped or has no endpoint")
+        if Chats.pending(c):
+            raise ApiError(409, "approve or decline the proposed action first")
         if c.get("live"):                                       # a chat started from the page: keep its summary current
             fresh = rt.snapshot_context()
             if fresh:
                 chats.set_context(cid, fresh)
                 c = chats.get(cid)
-        chats.add(cid, "user", text)
+        toolbox = self._toolbox()
+        wire = list(c["wire"])
+        if not wire:
+            wire = base_messages(c["context"], c["screen"], tools_on=bool(toolbox.names))
+            if c.get("first"):
+                wire.append({"role": "assistant", "content": c["first"]})
+        start = len(wire)
+        wire.append({"role": "user", "content": text})
         try:
-            reply = chat_reply(rt.client, c["context"], c["screen"], chats.get(cid)["messages"])
+            out = self._turn(cid, wire, toolbox)
         except LLMError as e:
             raise ApiError(502, f"the model did not answer: {e}") from None
-        chats.add(cid, "assistant", reply or "I could not write a reply this time. Try again.")
+        self._record(cid, out["messages"], start, [{"kind": "user", "text": text}], out)
         return self.chat_get(cid)
+
+    def chat_action(self, cid: int, item_id: int, approve: bool) -> dict:
+        from llm.chat import tool_result_message
+        from llm.client import LLMError
+        chats = self._chats()
+        c = chats.get(cid)
+        item = None if c is None else next((i for i in c["items"] if i["id"] == item_id and i["kind"] == "action"), None)
+        if item is None:
+            raise ApiError(404, "no such action")
+        if item["action"]["state"] != "pending" or not chats.claim_action(cid, item_id):
+            raise ApiError(409, "that action was already decided")
+        if getattr(self.runtime, "client", None) is None:
+            chats.set_action(cid, item_id, "pending")
+            raise ApiError(409, "no model is connected: the agent is stopped or has no endpoint")
+        toolbox = self._toolbox()
+        name = item["action"]["name"]
+        if not approve:
+            chats.set_action(cid, item_id, "declined")
+            result = "The person declined this action."
+        else:
+            done = toolbox.perform(name, item["_args"])
+            if done["ok"]:
+                chats.set_action(cid, item_id, "approved", done["detail"], done.get("undo"))
+                result = f"Done: {done['detail']}"
+            else:
+                chats.set_action(cid, item_id, "failed", done["detail"])
+                result = f"Failed: {done['detail']}"
+        wire = c["wire"] + [tool_result_message(item["_call"], result)]
+        try:
+            out = self._turn(cid, wire, toolbox)
+        except LLMError:
+            chats.set_wire(cid, wire)                           # the action stands; the next message continues from here
+            return self.chat_get(cid)
+        self._record(cid, out["messages"], None, [], out)
+        return self.chat_get(cid)
+
+    def _undo_write(self, undo: dict) -> tuple[bool, str]:
+        from .chat_tools import undo_write
+        return undo_write(undo)
+
+    def chat_rewind_preview(self, cid: int, item_id: int) -> dict:
+        try:
+            return self._chats().rewind_preview(cid, item_id)
+        except KeyError:
+            raise ApiError(404, "no such conversation or message") from None
+        except ValueError as e:
+            raise ApiError(400, str(e)) from None
+
+    def chat_rewind(self, cid: int, item_id: int, message: str | None = None) -> dict:
+        chats = self._chats()
+        if message is not None:
+            if not str(message).strip():
+                raise ApiError(400, "write a message first")
+            if getattr(self.runtime, "client", None) is None:
+                raise ApiError(409, "no model is connected: the agent is stopped or has no endpoint")
+        try:
+            out = chats.rewind(cid, item_id, undo=self._undo_write)
+        except KeyError:
+            raise ApiError(404, "no such conversation or message") from None
+        except ValueError as e:
+            raise ApiError(400, str(e)) from None
+        view = self.chat_get(cid) if message is None else self.chat_send(cid, message)
+        return {"chat": view, "undone": out["undone"], "skipped": out["skipped"]}
 
     def decisions(self) -> dict:
         from . import offers
@@ -488,12 +614,22 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 "/api/export": lambda: api.export(q.get("what", "decisions"), q.get("format", "csv")),
             }
             if path.startswith("/api/chats/"):
+                parts = path.strip("/").split("/")
                 try:
-                    cid = int(path.rsplit("/", 1)[1])
-                except ValueError:
+                    cid = int(parts[2])
+                    assert len(parts) in (3, 4) and (len(parts) == 3 or parts[3] == "rewind")
+                except (ValueError, IndexError, AssertionError):
                     self._json({"error": "not found"}, 404)
                     return
-                self._reply(lambda: api.chat_get(cid))
+                if len(parts) == 3:
+                    self._reply(lambda: api.chat_get(cid))
+                    return
+                try:
+                    item = int(q["item"])
+                except (KeyError, ValueError):
+                    self._json({"error": "expected ?item=<id>"}, 400)
+                    return
+                self._reply(lambda: api.chat_rewind_preview(cid, item))
             elif path == "/api/events":
                 self._stream(q.get("client") == "tray")
             elif path in routes:
@@ -518,6 +654,35 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 target = index                             # a page route: the app draws it
             ctype = TYPES.get(target.suffix) or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
             self._send(200, target.read_bytes(), ctype)
+
+        def _chat_post(self, parts: list[str], b: dict) -> None:
+            def whole(v):
+                return v if isinstance(v, int) and not isinstance(v, bool) else None
+            try:
+                cid = int(parts[2])
+            except ValueError:
+                self._json({"error": "not found"}, 404)
+                return
+            if len(parts) == 3:
+                self._reply(lambda: api.chat_send(cid, b.get("message", "")))
+            elif len(parts) == 4 and parts[3] == "rewind":
+                item = whole(b.get("item"))
+                if item is None:
+                    self._json({"error": "expected {\"item\": <id>}"}, 400)
+                    return
+                self._reply(lambda: api.chat_rewind(cid, item, b.get("message")))
+            elif len(parts) == 5 and parts[3] == "actions":
+                try:
+                    item = int(parts[4])
+                except ValueError:
+                    self._json({"error": "not found"}, 404)
+                    return
+                if not isinstance(b.get("approve"), bool):
+                    self._json({"error": "expected {\"approve\": true or false}"}, 400)
+                    return
+                self._reply(lambda: api.chat_action(cid, item, b["approve"]))
+            else:
+                self._json({"error": "not found"}, 404)
 
         # ---- POST ----
         def do_POST(self) -> None:
@@ -566,13 +731,8 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 self._json({"ok": ok} if ok else {"ok": False, "error": "that question is no longer open"}, 200 if ok else 409)
                 return
             b = body if isinstance(body, dict) else {}
-            if parts[:2] == ["api", "chats"] and len(parts) == 3:
-                try:
-                    cid = int(parts[2])
-                except ValueError:
-                    self._json({"error": "not found"}, 404)
-                    return
-                self._reply(lambda: api.chat_send(cid, b.get("message", "")))
+            if parts[:2] == ["api", "chats"] and len(parts) > 2:
+                self._chat_post(parts, b)
                 return
             routes = {
                 "/api/settings": lambda: api.save_settings(b),

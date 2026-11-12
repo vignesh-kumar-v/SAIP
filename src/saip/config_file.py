@@ -16,7 +16,7 @@ from pathlib import Path
 from llm.config import AgentConfig, GateParams, LLMConfig, load_settings
 
 SECTIONS = {"llm": LLMConfig, "gate": GateParams, "agent": AgentConfig}
-SECRET = {("llm", "api_key")}
+SECRET = {("llm", "api_key"), ("llm", "search_api_key")}
 
 
 class SettingError(ValueError):
@@ -145,7 +145,7 @@ def write_settings(path: Path, changes: dict) -> list[str]:
 
 
 def public_settings(settings) -> dict:
-    """The settings as the page may see them: everything except the API key, which is reported as set or not."""
+    """The settings as the page may see them: everything except the secret keys, which are reported as set or not."""
     out = {}
     for section, cls in SECTIONS.items():
         obj = getattr(settings, {"llm": "llm", "gate": "gate", "agent": "agent"}[section])
@@ -153,7 +153,7 @@ def public_settings(settings) -> dict:
         for f in fields(cls):
             v = getattr(obj, f.name)
             if (section, f.name) in SECRET:
-                table["api_key_set"] = bool(v)
+                table[f.name + "_set"] = bool(v)
                 continue
             table[f.name] = list(v) if isinstance(v, tuple) else v
         out[section] = table

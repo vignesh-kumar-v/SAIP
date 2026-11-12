@@ -1,15 +1,16 @@
 import { ArrowUp, MessageSquarePlus } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
+import { ActionCard, ConfirmRewind, ToolLine, UserBubble, itemsOf, toolsSummary } from "../components/ChatParts";
 import { Button, Card, Empty, Mark, Spinner, cx } from "../components/ui";
 import { ApiError, get, post } from "../lib/api";
 import { ago } from "../lib/format";
 import { navigate } from "../lib/router";
 import { useLive } from "../lib/store";
 import { useJson } from "../lib/hooks";
+import type { ChatItem, ChatView as Chat, RewindPreview, RewindResult } from "../lib/types";
 
-type Message = { role: "user" | "assistant"; text: string; at: number };
-type Chat = { id: number; title: string; created: number; messages: Message[]; has_screen: boolean };
+type Confirm = { item: number; message?: string; text: string; preview: RewindPreview };
 type Listing = { chats: { id: number; title: string; created: number; count: number; last: string }[]; available: boolean };
 
 const STARTERS = ["Help me think through what to do next", "Explain what I'm looking at", "What am I missing?"];
@@ -22,6 +23,11 @@ export function Chat() {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [acting, setActing] = useState<number | null>(null);
+  const [editing, setEditing] = useState<number | null>(null);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [rewinding, setRewinding] = useState(false);
+  const [slow, setSlow] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
 
@@ -55,17 +61,33 @@ export function Chat() {
     else if (!current && !sessionFromUrl && list.data.chats[0]) open(list.data.chats[0].id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [list.data]);
+  const items = current ? itemsOf(current) : [];
+  const changeable = !!current?.items;
+  const pending = items.some((i) => i.kind === "action" && i.action?.state === "pending");
+  const working = sending || acting !== null || rewinding;
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [current?.messages.length, sending]);
+  }, [items.length, working, pending]);
+  useEffect(() => {
+    setSlow(false);
+    if (!working) return;
+    const t = setTimeout(() => setSlow(true), 6000);
+    return () => clearTimeout(t);
+  }, [working]);
 
   const send = async (message: string, chat: Chat | null = current) => {
     const m = message.trim();
-    if (!m || !chat || sending) return;
+    if (!m || !chat || working) return;
     setText("");
     setSending(true);
     setError(null);
-    setCurrent({ ...chat, messages: [...chat.messages, { role: "user", text: m, at: Date.now() / 1000 }] });
+    const now = Date.now() / 1000;
+    const shown = itemsOf(chat);
+    setCurrent({
+      ...chat,
+      items: chat.items ? [...chat.items, { id: Math.max(0, ...shown.map((i) => i.id)) + 1, kind: "user", at: now, text: m }] : undefined,
+      messages: [...chat.messages, { role: "user", text: m, at: now }],
+    });
     try {
       setCurrent(await post<Chat>(`/api/chats/${chat.id}`, { message: m }));
       list.reload();
@@ -74,6 +96,54 @@ export function Chat() {
     }
     setSending(false);
     box.current?.focus();
+  };
+
+  const decide = async (item: ChatItem, approve: boolean) => {
+    if (!current || working) return;
+    setActing(item.id);
+    setError(null);
+    try {
+      setCurrent(await post<Chat>(`/api/chats/${current.id}/actions/${item.id}`, { approve }));
+      list.reload();
+    } catch (e: any) {
+      setError(e.message);
+    }
+    setActing(null);
+  };
+
+  const doRewind = async (itemId: number, text: string, message?: string) => {
+    if (!current) return;
+    setRewinding(true);
+    setError(null);
+    try {
+      const r = await post<RewindResult>(`/api/chats/${current.id}/rewind`, message === undefined ? { item: itemId } : { item: itemId, message });
+      setCurrent(r.chat);
+      setEditing(null);
+      setConfirm(null);
+      if (message === undefined) {
+        setText(text);
+        setTimeout(() => box.current?.focus(), 0);
+      }
+      if (r.skipped.length) setError(`Left alone because it changed since: ${r.skipped.join(", ")}`);
+      list.reload();
+    } catch (e: any) {
+      setConfirm(null);
+      setError(e.message);
+    }
+    setRewinding(false);
+  };
+  // Look at what a rewind would do first; an edit that drops nothing else goes straight through.
+  const startRewind = async (item: ChatItem, message?: string) => {
+    if (!current || working) return;
+    setError(null);
+    try {
+      const preview = await get<RewindPreview>(`/api/chats/${current.id}/rewind?item=${item.id}`);
+      const plain = message !== undefined && preview.drops <= 1 && !preview.undo.length && !preview.cannot_undo.length;
+      if (plain) await doRewind(item.id, item.text, message);
+      else setConfirm({ item: item.id, message, text: item.text, preview });
+    } catch (e: any) {
+      setError(e.message);
+    }
   };
 
   const available = list.data?.available ?? true;
@@ -106,7 +176,7 @@ export function Chat() {
             <div>
               <h1 className="text-[22px] font-semibold tracking-tight">Talk it through</h1>
               <p className="mx-auto mt-1.5 max-w-[46ch] text-[14px] leading-relaxed text-muted">
-                SAIP's assistant knows what you were doing in the last few minutes. It only talks: it never types or changes anything on your machine.
+                SAIP's assistant knows what you were doing in the last few minutes. It only talks, unless you let it use tools: it can then propose an action, and nothing happens until you approve it.
               </p>
             </div>
             {error && <div className="max-w-md rounded-xl border border-stuck/40 bg-stuck-soft px-3.5 py-2 text-[13px] text-ink">{error}</div>}
@@ -130,19 +200,37 @@ export function Chat() {
                 <div className="truncate text-[14px] font-medium">{current.title}</div>
                 <div className="text-[11.5px] text-faint">
                   started {ago(Date.now() / 1000 - current.created)} · {current.has_screen ? "sees your screen text" : "activity summary only"}
+                  {toolsSummary(current.tools ?? []) && <> · {toolsSummary(current.tools ?? [])}</>}
                 </div>
               </div>
             </header>
             <div className="scroll-thin flex-1 space-y-4 overflow-auto px-5 py-5">
               <AnimatePresence initial={false}>
-                {current.messages.map((m, k) => (
-                  <motion.div key={k} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }} className={cx("flex", m.role === "user" ? "justify-end" : "justify-start")}>
-                    <div className={cx("max-w-[min(640px,88%)] rounded-2xl px-4 py-2.5 text-[14.5px] leading-relaxed whitespace-pre-wrap", m.role === "user" ? "bg-ink text-canvas" : "border border-line bg-raised text-ink")}>
-                      {m.text}
-                    </div>
+                {items.map((it) => (
+                  <motion.div key={it.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.25 }}>
+                    {it.kind === "user" ? (
+                      <UserBubble
+                        item={it}
+                        canChange={changeable}
+                        editing={editing === it.id}
+                        disabled={working || pending}
+                        onEdit={() => setEditing(it.id)}
+                        onCancel={() => setEditing(null)}
+                        onSend={(t) => startRewind(it, t.trim())}
+                        onRewind={() => startRewind(it)}
+                      />
+                    ) : it.kind === "assistant" ? (
+                      <div className="flex justify-start">
+                        <div className="max-w-[min(640px,88%)] rounded-2xl border border-line bg-raised px-4 py-2.5 text-[14.5px] leading-relaxed whitespace-pre-wrap text-ink">{it.text}</div>
+                      </div>
+                    ) : it.kind === "tool" ? (
+                      <ToolLine item={it} />
+                    ) : (
+                      <ActionCard item={it} busy={acting === it.id} locked={working} onDecide={(ok) => decide(it, ok)} />
+                    )}
                   </motion.div>
                 ))}
-                {sending && (
+                {working && (
                   <motion.div key="typing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex">
                     <div className="flex items-center gap-1.5 rounded-2xl border border-line bg-raised px-4 py-3">
                       {[0, 1, 2].map((d) => (
@@ -152,6 +240,7 @@ export function Chat() {
                   </motion.div>
                 )}
               </AnimatePresence>
+              {slow && <p className="text-center text-[12px] text-faint">Still working: the model may be using tools.</p>}
               <div ref={end} />
             </div>
             {error && <div className="mx-5 mb-2 rounded-xl border border-stuck/40 bg-stuck-soft px-3.5 py-2 text-[13px] text-ink">{error}</div>}
@@ -160,12 +249,13 @@ export function Chat() {
                 e.preventDefault();
                 send(text);
               }}
-              className="flex items-end gap-2 border-t border-line p-3"
+              className="flex flex-wrap items-end gap-2 border-t border-line p-3"
             >
               <textarea
                 ref={box}
                 value={text}
                 rows={1}
+                disabled={pending}
                 onChange={(e) => setText(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
@@ -174,12 +264,20 @@ export function Chat() {
                   }
                 }}
                 placeholder="Ask something, or say where you're stuck"
-                className="max-h-40 min-h-[42px] flex-1 resize-none rounded-xl border border-line bg-canvas px-3.5 py-2.5 text-[14.5px] text-ink placeholder:text-faint focus:border-flow focus:outline-none"
+                className="max-h-40 min-h-[42px] flex-1 resize-none rounded-xl border border-line bg-canvas px-3.5 py-2.5 text-[14.5px] text-ink placeholder:text-faint focus:border-flow focus:outline-none disabled:opacity-50"
               />
-              <Button type="submit" variant="primary" disabled={!text.trim() || sending} aria-label="Send" className="h-[42px] w-[42px] px-0">
-                {sending ? <Spinner /> : <ArrowUp size={18} />}
+              <Button type="submit" variant="primary" disabled={!text.trim() || working || pending} aria-label="Send" className="h-[42px] w-[42px] px-0">
+                {working ? <Spinner /> : <ArrowUp size={18} />}
               </Button>
+              {pending && <p className="w-full px-1 text-[12px] text-faint">Approve or decline the proposed action first.</p>}
             </form>
+            <ConfirmRewind
+              preview={confirm?.preview ?? null}
+              edit={confirm?.message !== undefined}
+              busy={rewinding}
+              onConfirm={() => confirm && doRewind(confirm.item, confirm.text, confirm.message)}
+              onCancel={() => setConfirm(null)}
+            />
           </>
         )}
       </Card>

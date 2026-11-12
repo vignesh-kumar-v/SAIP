@@ -116,6 +116,10 @@ export type Settings = {
     read_screen: boolean;
     screen_chars: number;
     reasoning_effort: string;
+    chat_tools?: boolean;
+    web_search?: boolean;
+    search_provider?: string;
+    search_api_key_set?: boolean;
   };
   gate: Record<string, number>;
   agent: {
@@ -183,3 +187,37 @@ export type InspectorEntry = DecisionRow & {
 };
 
 export type RepoRow = { path: string; state: string; detail: string };
+
+// ---- chat ----
+export type ActionState = "pending" | "approved" | "declined" | "undone" | "failed";
+export type ChatAction = {
+  name: "write_file" | "copy_to_clipboard";
+  title: string;
+  path: string | null;
+  content: string;
+  diff: string | null;
+  exists: boolean;
+  state: ActionState;
+  detail?: string;
+  undoable: boolean;
+};
+export type ChatItem = {
+  id: number;
+  kind: "user" | "assistant" | "tool" | "action";
+  at: number;
+  text: string;
+  tool?: { name: string; label: string; ok: boolean };
+  action?: ChatAction;
+};
+export type ChatMessage = { role: "user" | "assistant"; text: string; at: number };
+export type ChatView = {
+  id: number;
+  title: string;
+  created: number;
+  has_screen: boolean;
+  tools?: string[];
+  items?: ChatItem[];
+  messages: ChatMessage[];
+};
+export type RewindPreview = { item: number; drops: number; undo: { path: string; effect: "restore" | "delete" }[]; cannot_undo: string[] };
+export type RewindResult = { chat: ChatView; undone: string[]; skipped: string[] };

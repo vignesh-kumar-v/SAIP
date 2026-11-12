@@ -174,6 +174,16 @@ AppIndicator extension.
 
 **Chat and notifications.** Each offer also sends a system notification (switch off in Settings or with `notify_offers = false` under `[agent]`), so it is seen with the dashboard in the background. "Help me" opens a conversation in the dashboard's Chat page, seeded with the help, the activity summary and the screen text; you can also start one from there. Conversations are kept in memory for the run and the model only writes words. Screen text is cut at line, sentence or word boundaries, with `[…]` where SAIP cut it and `▌` at the cursor, and a reply the endpoint cut at its token limit is retried once and then trimmed to its last full sentence.
 
+**Chat tools.** The chat model can use tools (`chat_tools`, on by default; Settings > Chat tools). Reading tools run
+at once and show as a line in the chat: your screen text, the activity summary, `git log` and `git diff` in watched
+repositories, and text files inside your watched folders. Two actions are only proposed, and nothing happens until you
+press Approve: copying to the clipboard, and writing a plain-text or code file inside a watched folder (never inside
+`.git`, never into an app, no commits, no commands). Web search is off until you switch it on (`web_search`):
+DuckDuckGo's HTML page by default, or Brave / Tavily with a key; pages on this machine or a private network are
+refused. You can edit an earlier message and send it again, or rewind to it: both drop everything after it and put
+back files written since (a file you changed afterwards is left alone; a clipboard copy or a search cannot be undone).
+What a tool reads goes to your model endpoint, and search words go to the search service.
+
 **Launch at login.** Off by default; switch it on from the tray or Settings. It adds a LaunchAgent on macOS, a
 value under the user's `Run` registry key on Windows, or an XDG autostart entry on Linux, and starts
 `saip run --no-browser`. `saip uninstall` removes it.

@@ -45,6 +45,10 @@ class LLMConfig:
     screen_chars: int = 1200             # how much of it the model is shown
     reasoning_effort: str = ""           # sent as-is when set: "none" stops a thinking model from reasoning first,
                                          # so the first token is the yes/no answer the confidence step reads
+    chat_tools: bool = True              # the chat model may use tools (reading is automatic, writing needs approval)
+    web_search: bool = False             # the chat model may search the web and open pages (off until you allow it)
+    search_provider: str = ""            # "" or "duckduckgo" (no key), "brave" or "tavily" (need search_api_key)
+    search_api_key: str = ""             # key for the chosen search provider
 
 
 @dataclass(frozen=True)

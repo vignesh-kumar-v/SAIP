@@ -2,8 +2,8 @@ import { CheckCircle2, Power, RefreshCw } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { AppPicker, blockList } from "../components/AppPicker";
-import { ActivityWatchPanel, CheckRows, FeatureToggles, HookPanel, ModelForm, PermissionsPanel, ReposPanel, type FeatureValues } from "../components/SetupPanels";
-import { Button, Card, Input, Toggle, cx } from "../components/ui";
+import { ActivityWatchPanel, CheckRows, FeatureToggles, HookPanel, ModelForm, Note, PermissionsPanel, ReposPanel, type FeatureValues } from "../components/SetupPanels";
+import { Button, Card, Field, Input, Toggle, cx } from "../components/ui";
 import { post } from "../lib/api";
 import { useJson } from "../lib/hooks";
 import { useLive } from "../lib/store";
@@ -12,6 +12,7 @@ import type { AppsPayload, Check, Settings as SettingsT } from "../lib/types";
 const SECTIONS = [
   ["model", "Model"],
   ["features", "What it reads"],
+  ["chat", "Chat tools"],
   ["privacy", "Blocked apps"],
   ["notifications", "Notifications"],
   ["activitywatch", "ActivityWatch"],
@@ -75,6 +76,97 @@ function Features({ s, reload }: { s: SettingsT; reload: () => void }) {
       <FeatureToggles value={v} onChange={save} />
       <div className="mt-5">
         <PermissionsPanel typed={v.typed} screen={v.screen} />
+      </div>
+    </Section>
+  );
+}
+
+const PROVIDERS = [
+  ["duckduckgo", "DuckDuckGo (no key, unofficial)"],
+  ["brave", "Brave Search (API key)"],
+  ["tavily", "Tavily (API key)"],
+] as const;
+
+function ChatTools({ s, reload }: { s: SettingsT; reload: () => void }) {
+  const tools = !!s.llm.chat_tools;
+  const web = !!s.llm.web_search;
+  const [provider, setProvider] = useState(s.llm.search_provider || "duckduckgo");
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [flash, show] = useFlash();
+  useEffect(() => setProvider(s.llm.search_provider || "duckduckgo"), [s.llm.search_provider]);
+  const keyed = provider === "brave" || provider === "tavily";
+  const dirty = provider !== (s.llm.search_provider || "duckduckgo") || key !== "";
+  const save = async (llm: Record<string, unknown>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await post("/api/settings", { llm });
+      show();
+      reload();
+      return true;
+    } catch (e: any) {
+      setErr(e.message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saveSearch = async () => {
+    if (await save({ search_provider: provider, search_api_key: keyed && key ? key : null })) setKey("");
+  };
+  const row = (title: string, hint: string, on: boolean, disabled: boolean, change: (v: boolean) => void) => (
+    <div className="flex items-center gap-4 rounded-xl border border-line px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] text-ink">{title}</div>
+        <div className="text-[12px] text-faint">{hint}</div>
+      </div>
+      <Toggle checked={on} disabled={disabled || busy} onChange={change} label={title} />
+    </div>
+  );
+  return (
+    <Section id="chat" title="Chat tools" lead="Let the chat look things up and propose changes. Nothing is changed without your approval." right={busy ? <RefreshCw size={15} className="animate-spin text-muted" /> : <SavedFlash show={flash} />}>
+      <div className="space-y-3">
+        {row(
+          "Let the chat use tools",
+          "Reading your screen, activity, git and files in your watched folders. Copying to the clipboard and writing text files are only proposed: you approve each one.",
+          tools,
+          false,
+          (v) => save({ chat_tools: v }),
+        )}
+        {row("Web search", "Your search words go to the search service. Off unless you switch it on.", web, !tools, (v) => save({ web_search: v }))}
+        {tools && web && (
+          <div className="space-y-3 rounded-xl border border-line px-4 py-3">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Search service">
+                <select
+                  value={provider}
+                  onChange={(e) => setProvider(e.target.value)}
+                  className="h-10 w-full rounded-xl border border-line bg-canvas px-3 text-[14px] text-ink transition-colors focus:border-flow focus:outline-none"
+                >
+                  {PROVIDERS.map(([v, label]) => (
+                    <option key={v} value={v}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {keyed && (
+                <Field label="API key" hint={s.llm.search_api_key_set ? "A key is saved. Leave empty to keep it." : "Needed for this service."}>
+                  <Input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={s.llm.search_api_key_set ? "•••••••• saved" : "API key"} autoComplete="new-password" />
+                </Field>
+              )}
+            </div>
+            <Button variant="primary" size="sm" disabled={!dirty} busy={busy} onClick={saveSearch}>
+              Save
+            </Button>
+          </div>
+        )}
+        {err && <p className="text-[13px] text-danger">{err}</p>}
+        <Note>
+          What leaves this machine: file and diff text you let the chat read goes to your model endpoint, and search words go to the search service you pick. Nothing else is sent.
+        </Note>
       </div>
     </Section>
   );
@@ -337,6 +429,7 @@ export function Settings() {
               <ModelForm initial={{ base_url: s.llm.base_url, model: s.llm.model, api_key_set: s.llm.api_key_set }} onSaved={refresh} />
             </Section>
             <Features s={s} reload={refresh} />
+            <ChatTools s={s} reload={refresh} />
             <Privacy reload={refresh} />
             <Notifications s={s} reload={refresh} />
             <Section id="activitywatch" title="ActivityWatch" lead="Where SAIP's activity data comes from.">

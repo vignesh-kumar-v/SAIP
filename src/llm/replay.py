@@ -49,6 +49,10 @@ class MockClient:
         return [Choice("Yes" if p >= 0.5 else "No",
                        {"Yes": math.log(p), "No": math.log(1 - p)} if logprobs else None)]
 
+    def chat(self, messages, *, tools=None, max_tokens=420, temperature=0.4):
+        return {"content": "This is the mock model: it cannot use tools or read your work.", "tool_calls": [],
+                "finish_reason": "stop"}
+
 
 @dataclass
 class Row:
