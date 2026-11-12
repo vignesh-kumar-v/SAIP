@@ -22,3 +22,15 @@ describe("chat markdown", () => {
     expect(b[0].t).toBe("p");
   });
 });
+
+import { splitQuote, withQuote } from "./ChatParts";
+
+describe("replying to a message", () => {
+  it("round-trips a quote above the reply", () => {
+    const sent = withQuote("first line\nsecond line", "yes, the second");
+    expect(sent).toBe("> first line\n> second line\n\nyes, the second");
+    expect(splitQuote(sent)).toEqual({ quote: "first line\nsecond line", rest: "yes, the second" });
+    expect(splitQuote("no quote here")).toEqual({ quote: null, rest: "no quote here" });
+    expect(withQuote(null, "plain")).toBe("plain");
+  });
+});

@@ -1,9 +1,78 @@
 // Pieces of the Chat page: the conversation items, the action card and the rewind confirm.
 import * as Dialog from "@radix-ui/react-dialog";
-import { Activity, ClipboardCopy, FilePenLine, FileText, GitBranch, Globe, MonitorSmartphone, Pencil, Undo2, Wrench } from "lucide-react";
-import { useState } from "react";
+import { Activity, ClipboardCopy, FilePenLine, FileText, GitBranch, Globe, MonitorSmartphone, Pencil, Quote, Reply, Undo2, Wrench } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { ChatAction, ChatItem, ChatView, RewindPreview } from "../lib/types";
+import { Markdown } from "./Markdown";
 import { Button, Pill, Tip, cx } from "./ui";
+
+const QUOTE_MAX = 700;
+
+/** A message that starts with "> " lines is a reply to something: split the quoted part from what was written. */
+export function splitQuote(text: string): { quote: string | null; rest: string } {
+  const lines = text.split("\n");
+  let n = 0;
+  while (n < lines.length && /^>\s?/.test(lines[n])) n++;
+  if (!n) return { quote: null, rest: text };
+  return { quote: lines.slice(0, n).map((l) => l.replace(/^>\s?/, "")).join("\n"), rest: lines.slice(n).join("\n").replace(/^\n+/, "") };
+}
+
+/** The text to send: the quote as "> " lines, a blank line, then the message. */
+export function withQuote(quote: string | null, message: string): string {
+  if (!quote) return message;
+  const q = quote.trim().slice(0, QUOTE_MAX).split("\n").map((l) => `> ${l}`).join("\n");
+  return `${q}\n\n${message}`;
+}
+
+/** An AI message: Markdown, a Reply button on hover, and a floating "Quote" button over any text you select. */
+export function AssistantBubble({ text, onQuote, disabled }: { text: string; onQuote: (quote: string) => void; disabled: boolean }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [sel, setSel] = useState<{ text: string; top: number; left: number } | null>(null);
+  useEffect(() => {
+    const clear = () => {
+      const s = window.getSelection();
+      if (!s || s.isCollapsed) setSel(null);
+    };
+    document.addEventListener("selectionchange", clear);
+    return () => document.removeEventListener("selectionchange", clear);
+  }, []);
+  const onUp = () => {
+    const s = window.getSelection();
+    if (!s || s.isCollapsed || !ref.current || !ref.current.contains(s.anchorNode) || !ref.current.contains(s.focusNode)) return setSel(null);
+    const t = s.toString().trim();
+    if (!t) return setSel(null);
+    const r = s.getRangeAt(0).getBoundingClientRect();
+    setSel({ text: t, top: Math.max(8, r.top - 40), left: r.left + r.width / 2 });
+  };
+  return (
+    <div className="group flex items-start gap-1.5">
+      <div ref={ref} onMouseUp={onUp} className="max-w-[min(720px,92%)] min-w-0 rounded-2xl border border-line bg-raised px-4 py-2.5 text-[14.5px] leading-relaxed text-ink">
+        <Markdown text={text} />
+      </div>
+      <div className="mt-1 flex opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100 max-sm:opacity-100">
+        <Tip content="Reply to this message">
+          <button disabled={disabled} onClick={() => onQuote(text)} aria-label="Reply to this message" className="rounded-lg p-1.5 text-faint transition-colors hover:bg-raised hover:text-ink disabled:pointer-events-none disabled:opacity-40">
+            <Reply size={14} />
+          </button>
+        </Tip>
+      </div>
+      {sel && (
+        <button
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            onQuote(sel.text);
+            window.getSelection()?.removeAllRanges();
+            setSel(null);
+          }}
+          style={{ top: sel.top, left: sel.left }}
+          className="fixed z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-lg border border-line-strong bg-raised px-2.5 py-1.5 text-[12.5px] text-ink shadow-xl transition-colors hover:border-flow"
+        >
+          <Quote size={13} /> Reply to this part
+        </button>
+      )}
+    </div>
+  );
+}
 
 /** Older servers send only `messages` and no tools: build items from those. */
 export function itemsOf(chat: ChatView): ChatItem[] {
@@ -189,7 +258,19 @@ export function UserBubble({
           </Tip>
         </div>
       )}
-      <div className="max-w-[min(640px,88%)] rounded-2xl bg-ink px-4 py-2.5 text-[14.5px] leading-relaxed whitespace-pre-wrap text-canvas">{item.text}</div>
+      <UserText text={item.text} />
+    </div>
+  );
+}
+
+function UserText({ text }: { text: string }) {
+  const { quote, rest } = splitQuote(text);
+  return (
+    <div className="max-w-[min(640px,88%)] rounded-2xl bg-ink px-4 py-2.5 text-[14.5px] leading-relaxed text-canvas">
+      {quote && (
+        <div className="mb-2 border-l-2 border-canvas/40 pl-3 text-[13px] whitespace-pre-wrap text-canvas/70">{quote}</div>
+      )}
+      <div className="whitespace-pre-wrap">{quote ? rest : text}</div>
     </div>
   );
 }

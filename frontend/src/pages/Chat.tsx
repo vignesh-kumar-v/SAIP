@@ -1,8 +1,7 @@
-import { ArrowUp, MessageSquarePlus } from "lucide-react";
+import { ArrowUp, MessageSquarePlus, Reply, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
-import { ActionCard, ConfirmRewind, ToolLine, UserBubble, itemsOf, toolsSummary } from "../components/ChatParts";
-import { Markdown } from "../components/Markdown";
+import { ActionCard, AssistantBubble, ConfirmRewind, ToolLine, UserBubble, itemsOf, toolsSummary, withQuote } from "../components/ChatParts";
 import { Button, Card, Empty, Mark, Spinner, cx } from "../components/ui";
 import { ApiError, get, post } from "../lib/api";
 import { ago } from "../lib/format";
@@ -29,6 +28,7 @@ export function Chat() {
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [rewinding, setRewinding] = useState(false);
   const [slow, setSlow] = useState(false);
+  const [quote, setQuote] = useState<string | null>(null);
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
 
@@ -75,6 +75,17 @@ export function Chat() {
     const t = setTimeout(() => setSlow(true), 6000);
     return () => clearTimeout(t);
   }, [working]);
+
+  const submit = () => {
+    if (!text.trim() || working || pending) return;
+    const message = withQuote(quote, text.trim());
+    setQuote(null);
+    send(message);
+  };
+  const startQuote = (q: string) => {
+    setQuote(q.length > 700 ? q.slice(0, 700).trimEnd() + "…" : q);
+    setTimeout(() => box.current?.focus(), 0);
+  };
 
   const send = async (message: string, chat: Chat | null = current) => {
     const m = message.trim();
@@ -221,9 +232,7 @@ export function Chat() {
                         onRewind={() => startRewind(it)}
                       />
                     ) : it.kind === "assistant" ? (
-                      <div className="flex justify-start">
-                        <div className="max-w-[min(720px,92%)] min-w-0 rounded-2xl border border-line bg-raised px-4 py-2.5 text-[14.5px] leading-relaxed text-ink"><Markdown text={it.text} /></div>
-                      </div>
+                      <AssistantBubble text={it.text} onQuote={startQuote} disabled={working || pending} />
                     ) : it.kind === "tool" ? (
                       <ToolLine item={it} />
                     ) : (
@@ -248,10 +257,26 @@ export function Chat() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                send(text);
+                submit();
               }}
               className="flex flex-wrap items-end gap-2 border-t border-line p-3"
             >
+              <AnimatePresence initial={false}>
+                {quote && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="w-full overflow-hidden">
+                    <div className="flex items-start gap-2.5 rounded-xl border border-line bg-raised px-3 py-2">
+                      <Reply size={14} className="mt-1 shrink-0 text-flow" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[11.5px] font-medium text-flow">Replying to</div>
+                        <p className="line-clamp-3 text-[13px] leading-snug whitespace-pre-wrap text-muted">{quote}</p>
+                      </div>
+                      <button type="button" onClick={() => setQuote(null)} aria-label="Remove the quote" className="rounded-md p-1 text-faint transition-colors hover:text-ink">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
               <textarea
                 ref={box}
                 value={text}
@@ -261,10 +286,10 @@ export function Chat() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    send(text);
+                    submit();
                   }
                 }}
-                placeholder="Ask something, or say where you're stuck"
+                placeholder={quote ? "Write your reply" : "Ask something, or say where you're stuck"}
                 className="max-h-40 min-h-[42px] flex-1 resize-none rounded-xl border border-line bg-canvas px-3.5 py-2.5 text-[14.5px] text-ink placeholder:text-faint focus:border-flow focus:outline-none disabled:opacity-50"
               />
               <Button type="submit" variant="primary" disabled={!text.trim() || working || pending} aria-label="Send" className="h-[42px] w-[42px] px-0">
