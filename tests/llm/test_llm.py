@@ -269,6 +269,19 @@ def test_context_includes_titles_only_when_asked():
     assert "secret_plan.py" in build_context(make_trace(), 300.0, 300.0, include_titles=True)
 
 
+def test_context_includes_typed_text_only_when_given():
+    assert "Recently typed" not in build_context(make_trace(), 300.0, 300.0)
+    assert "Recently typed" not in build_context(make_trace(), 300.0, 300.0, typed_text="   ")
+    text = build_context(make_trace(), 300.0, 300.0, typed_text="the delay is\nmostly caused by the, and")
+    assert 'Recently typed (oldest first, newest last): "the delay is mostly caused by the, and"' in text
+
+
+def test_the_system_prompts_no_longer_claim_the_model_never_sees_content():
+    from llm import prompts, proposal
+    assert "never content" not in prompts.SYSTEM
+    assert "typed" in prompts.SYSTEM and "typed" in proposal.SYSTEM
+
+
 def test_context_never_shows_the_stuck_score():
     assert "score" not in build_context(make_trace(hooks=True), 300.0, 300.0).lower()
 

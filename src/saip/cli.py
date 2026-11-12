@@ -33,7 +33,7 @@ from .agent import NotReady, Orchestrator, describe, fetch_trace, score_now
 from .aw import DEFAULT_URL, ActivityWatch, AWError
 from .hooks import githook
 from .platform import current
-from .screen import copy_to_clipboard, read_screen
+from .screen import copy_to_clipboard, read_screen, typed_for_model
 from .watchers import GitWatcher
 
 
@@ -163,13 +163,16 @@ def cmd_run(a) -> int:
     prompter.start()
     orch = Orchestrator(cfg)
 
-    # Start the typing monitor (Tier 1 -- Linux + macOS)
-    monitor = typing_monitor_mod.TypingMonitor()
-    if getattr(settings.agent, "monitor_typed_content", False):
-        monitor.start()
-        print("Typing content monitoring enabled.", flush=True)
+    # Opt-in typed-text monitor (Linux + macOS). Never records apps on the private list.
+    monitor = typing_monitor_mod.TypingMonitor(clip_chars=cfg.typed_text_max_chars, blocked=settings.llm.private_apps)
+    if cfg.monitor_typed_content:
+        try:
+            monitor.start()
+            print("Typed-text monitor on (memory only; F1 turns it off).", flush=True)
+        except RuntimeError as e:
+            print(f"Typed-text monitor not started: {e}", flush=True)
     else:
-        print("Typing content monitoring disabled (enable with monitor_typed_content=true in private.toml).", flush=True)
+        print("Typed-text monitor off (enable with monitor_typed_content = true in private.toml).", flush=True)
 
     want_screen = a.read_screen or settings.llm.read_screen
     seen = {"screen_warned": False}
@@ -178,10 +181,10 @@ def cmd_run(a) -> int:
         """The text in front of the user, if reading it is on, allowed and possible."""
         if not want_screen:
             return None
-        screen = read_screen(plat, settings.llm.base_url, settings.llm.private_apps, settings.llm.screen_chars)
+        screen = read_screen(plat, settings.llm.private_apps, settings.llm.screen_chars)
         if screen is None and not seen["screen_warned"]:
             seen["screen_warned"] = True
-            why = plat.screen_error or "nothing readable in the front app (or it is private, or the model is not local)"
+            why = plat.screen_error or "nothing readable in the front app (or it is on the private list)"
             print(f"{time.strftime('%H:%M:%S')}  screen text not used: {why}")
         return screen
 
@@ -223,7 +226,7 @@ def cmd_run(a) -> int:
             git.poll(now)
             try:
                 trace = fetch_trace(aw, now, cfg.history_min * 60)
-                typed_text = monitor.get_current_text() if monitor._running else None
+                typed_text = monitor.get_current_text() if monitor.running else None
                 tick = score_now(trace, now, typed_text=typed_text)
                 if a.trigger is not None:
                     tick.theta_trig = a.trigger                # testing: wake the LLM at this score instead
@@ -239,8 +242,10 @@ def cmd_run(a) -> int:
                 continue
             if client is not None:
                 def run_assess():
+                    typed = typed_for_model(typed_text)
                     seen["context"] = build_context(trace, tick.time, settings.llm.lookback_s,
-                                                    settings.llm.include_titles, settings.llm.private_apps)
+                                                    settings.llm.include_titles, settings.llm.private_apps,
+                                                    typed_text=typed)
                     return assess(client, settings, temps, seen["context"], tick.stuck_score)
                 try:
                     ev = orch.step(now, tick, run_assess)
@@ -291,7 +296,7 @@ def main(argv=None) -> int:
     r.add_argument("--notify", action="store_true", help="with --no-dialog, show a system notification when it speaks")
     r.add_argument("--no-dialog", action="store_true", help="print offers instead of asking with a dialog (no accept/dismiss)")
     r.add_argument("--read-screen", action="store_true",
-                   help="read the text near your cursor when writing an offer (model must be local; or set read_screen in private.toml)")
+                   help="read the text near your cursor when writing an offer (or set read_screen in private.toml)")
     r.add_argument("--config", help="path to private.toml")
     r.set_defaults(fn=cmd_run)
     s = sub.add_parser("setup", help="set everything up (safe to repeat)")

@@ -41,7 +41,7 @@ class LLMConfig:
     lookback_s: float = 300.0            # how much recent activity the model is shown
     include_titles: bool = False         # window titles stay on this machine unless you opt in
     private_apps: tuple = DEFAULT_PRIVATE_APPS
-    read_screen: bool = False            # read the focused text when an offer is written (local endpoint only)
+    read_screen: bool = False            # read the focused text when an offer is written
     screen_chars: int = 1200             # how much of it the model is shown
 
 
@@ -70,7 +70,8 @@ class AgentConfig:
     exclude: tuple = ()                  # folders (or repos) never to hook
     rescan_s: float = 300.0              # how often `saip run` looks for new repositories under the roots
     new_repos: str = "ask"               # what to do with a repository that appears later: ask, add, or ignore
-    monitor_typed_content: bool = False  # enable global keystroke monitoring (Tier 1 -- Linux + macOS)
+    monitor_typed_content: bool = False  # opt-in typed-text monitor (Linux + macOS); needs the `typing` extra
+    typed_text_max_chars: int = 200      # how much of the newest typed text the monitor hands out
 
 
 @dataclass(frozen=True)
