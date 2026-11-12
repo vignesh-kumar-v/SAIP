@@ -440,3 +440,46 @@ def test_settings_are_written_to_the_file_that_config_named(rig):
     rig.api.save_settings({"agent": {"keep_chats": True}})
     assert "keep_chats = true" in other.read_text()
     assert "keep_chats" not in (rig.root.parent / "private.toml").read_text()
+
+
+def test_chosen_chats_can_be_deleted_and_stay_deleted(tmp_path):
+    from saip.chats import Chats
+    path = tmp_path / "chats.jsonl"
+    a = Chats(path)
+    one, two, three = a.create("one"), a.create("two"), a.create("three")
+    assert a.delete([one, three, 999]) == 2                   # an id that is already gone is ignored
+    assert [c["id"] for c in a.listing()] == [two] and a.get(one) is None
+    assert [c["id"] for c in Chats(path).listing()] == [two]  # the saved file agrees
+    assert a.delete([]) == 0 and a.delete([one]) == 0
+
+
+def test_a_chat_deleted_while_the_model_answers_is_not_brought_back(rig):
+    chats, cid = rig.rt.chats, rig.cid
+
+    class Deleting(Model):
+        def chat(self, messages, tools=None, **kw):
+            chats.delete([cid])                               # the person deletes it mid-reply
+            return say("Too late.")
+
+    rig.rt.client = Deleting()
+    with pytest.raises(server.ApiError) as e:
+        rig.api.chat_send(cid, "hello")
+    assert e.value.code == 404 and chats.get(cid) is None and chats.listing() == []
+
+
+def test_deleting_chats_over_http(tmp_path, sandbox):  # noqa: F811
+    demo = DemoApi(Bus())
+    httpd = server.start(demo.bus, 0, api=demo)
+    b = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        ids = [_call(b, "/api/chats", {"title": t})[1]["id"] for t in ("a", "b", "c")]
+        before = {c["id"] for c in _call(b, "/api/chats")[1]["chats"]}
+        assert _call(b, "/api/chats/delete", {"ids": ids[:2]}) == (200, {"ok": True, "removed": 2})
+        after = {c["id"] for c in _call(b, "/api/chats")[1]["chats"]}
+        assert after == before - set(ids[:2]) and ids[2] in after
+        assert _call(b, f"/api/chats/{ids[0]}")[0] == 404
+        for bad in ({}, {"ids": []}, {"ids": "1"}, {"ids": ["1"]}, {"ids": [True]}):
+            assert _call(b, "/api/chats/delete", bad)[0] == 400
+    finally:
+        httpd.shutdown()
+        httpd.server_close()

@@ -19,6 +19,7 @@ Reading
 Changing
     POST /api/asks/<id>        {"button": "Help me"} answers an open question
     POST /api/chats/clear      forgets every conversation (and empties chats.jsonl when they are being kept)
+    POST /api/chats/delete     {"ids": [1, 2]} forgets those conversations (files they wrote stay as they are)
     POST /api/chats            {"title"?} starts a conversation; POST /api/chats/<id> {"message"} sends one and returns the reply
     POST /api/chats/<id>/actions/<item> {"approve": true|false} decides a proposed action; the model then carries on
     POST /api/chats/<id>/rewind {"item", "message"?} goes back to one of your messages (undoing files), optionally
@@ -199,6 +200,11 @@ class Api:
 
     def chats_clear(self) -> dict:
         return {"ok": True, "removed": self._chats().clear()}
+
+    def chats_delete(self, ids) -> dict:
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+            raise ApiError(400, "expected {\"ids\": [conversation ids]}")
+        return {"ok": True, "removed": self._chats().delete(ids)}
 
     def _tool_names(self) -> list[str]:
         if getattr(self.runtime, "client", None) is None:
@@ -742,6 +748,9 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
             b = body if isinstance(body, dict) else {}
             if parts == ["api", "chats", "clear"]:
                 self._reply(api.chats_clear)
+                return
+            if parts == ["api", "chats", "delete"]:
+                self._reply(lambda: api.chats_delete(b.get("ids")))
                 return
             if parts[:2] == ["api", "chats"] and len(parts) > 2:
                 self._chat_post(parts, b)

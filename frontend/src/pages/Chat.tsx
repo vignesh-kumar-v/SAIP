@@ -1,7 +1,7 @@
-import { ArrowUp, MessageSquarePlus, Reply, X } from "lucide-react";
+import { ArrowUp, Check, MessageSquarePlus, Reply, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
-import { ActionCard, AssistantBubble, ConfirmRewind, ToolLine, UserBubble, itemsOf, toolsSummary, withQuote } from "../components/ChatParts";
+import { ActionCard, AssistantBubble, ConfirmDelete, ConfirmRewind, ToolLine, UserBubble, itemsOf, toolsSummary, withQuote } from "../components/ChatParts";
 import { Button, Card, Empty, Mark, Spinner, cx } from "../components/ui";
 import { ApiError, get, post } from "../lib/api";
 import { ago } from "../lib/format";
@@ -29,6 +29,10 @@ export function Chat() {
   const [rewinding, setRewinding] = useState(false);
   const [slow, setSlow] = useState(false);
   const [quote, setQuote] = useState<string | null>(null);
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [toDelete, setToDelete] = useState<number[] | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
 
@@ -158,28 +162,127 @@ export function Chat() {
     }
   };
 
+  const chats = list.data?.chats ?? [];
+  const stopSelecting = () => {
+    setSelecting(false);
+    setSelected(new Set());
+  };
+  const toggle = (id: number) =>
+    setSelected((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const allSelected = chats.length > 0 && chats.every((c) => selected.has(c.id));
+  // The chat being answered right now cannot be deleted until the reply is in.
+  const busyWith = (ids: number[]) => working && current !== null && ids.includes(current.id);
+
+  const remove = async () => {
+    if (!toDelete || busyWith(toDelete)) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await post("/api/chats/delete", { ids: toDelete });
+      if (current && toDelete.includes(current.id)) {
+        setCurrent(null);
+        setEditing(null);
+        setQuote(null);
+        navigate("/chat", true);
+      }
+      stopSelecting();
+      list.reload();
+    } catch (e: any) {
+      setError(e instanceof ApiError && e.status === 404
+        ? "This SAIP is older than the page: stop it (Ctrl-C) and start it again with `saip run`."
+        : e.message);
+    }
+    setToDelete(null);
+    setDeleting(false);
+  };
+
   const available = list.data?.available ?? true;
 
   return (
     <div className="grid h-[calc(100vh-7rem)] min-h-[460px] gap-5 lg:grid-cols-[260px_1fr]">
-      <Card className="scroll-thin hidden min-h-0 flex-col overflow-auto p-2 lg:flex">
-        <Button variant="subtle" size="sm" className="m-1 mb-2" onClick={() => (setCurrent(null), create())}>
-          <MessageSquarePlus size={15} /> New chat
-        </Button>
+      <Card className="hidden min-h-0 flex-col p-2 lg:flex">
+        <div className="m-1 mb-2 flex gap-1.5">
+          <Button variant="subtle" size="sm" className="flex-1" disabled={selecting} onClick={() => (setCurrent(null), create())}>
+            <MessageSquarePlus size={15} /> New chat
+          </Button>
+          {chats.length > 0 && (
+            <Button variant="ghost" size="sm" aria-pressed={selecting} onClick={() => (selecting ? stopSelecting() : setSelecting(true))}>
+              {selecting ? "Done" : "Select"}
+            </Button>
+          )}
+        </div>
+        {selecting && (
+          <div className="flex items-center justify-between px-3 pb-1.5 text-[12px]">
+            <span className="text-faint">{selected.size} selected</span>
+            <button
+              onClick={() => setSelected(allSelected ? new Set() : new Set(chats.map((c) => c.id)))}
+              className="rounded-md px-1 text-muted transition-colors hover:text-ink"
+            >
+              {allSelected ? "Select none" : "Select all"}
+            </button>
+          </div>
+        )}
         {error && !current && <p className="px-3 pb-2 text-[12px] text-stuck">{error}</p>}
         {list.data?.chats.length === 0 && <p className="px-3 py-2 text-[12.5px] text-faint">Conversations start when you press “Help me”, or here.</p>}
-        <ul className="space-y-0.5">
-          {list.data?.chats.map((c) => (
-            <li key={c.id}>
-              <button onClick={() => open(c.id)} className={cx("relative w-full rounded-xl px-3 py-2 text-left transition-colors", current?.id === c.id ? "text-ink" : "text-muted hover:text-ink")}>
-                {current?.id === c.id && <motion.span layoutId="chat-on" className="absolute inset-0 rounded-xl bg-raised" transition={{ type: "spring", stiffness: 400, damping: 34 }} />}
-                <span className="relative block truncate text-[13.5px]">{c.title}</span>
-                <span className="relative block truncate text-[11.5px] text-faint">{c.last || "empty"}</span>
-              </button>
-            </li>
-          ))}
+        <ul className="scroll-thin min-h-0 flex-1 space-y-0.5 overflow-auto">
+          {chats.map((c) => {
+            const on = selected.has(c.id);
+            return (
+              <li key={c.id} className="group relative">
+                <button
+                  onClick={() => (selecting ? toggle(c.id) : open(c.id))}
+                  role={selecting ? "checkbox" : undefined}
+                  aria-checked={selecting ? on : undefined}
+                  className={cx(
+                    "relative flex w-full items-start gap-2.5 rounded-xl px-3 py-2 text-left transition-colors",
+                    selecting ? (on ? "bg-raised text-ink" : "text-muted hover:text-ink") : current?.id === c.id ? "text-ink" : "text-muted hover:text-ink",
+                    !selecting && "pr-9",
+                  )}
+                >
+                  {!selecting && current?.id === c.id && <motion.span layoutId="chat-on" className="absolute inset-0 rounded-xl bg-raised" transition={{ type: "spring", stiffness: 400, damping: 34 }} />}
+                  {selecting && (
+                    <span className={cx("relative mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors", on ? "border-ink bg-ink text-canvas" : "border-line-strong")}>
+                      {on && <Check size={12} strokeWidth={3} />}
+                    </span>
+                  )}
+                  <span className="relative min-w-0 flex-1">
+                    <span className="block truncate text-[13.5px]">{c.title}</span>
+                    <span className="block truncate text-[11.5px] text-faint">{c.last || "empty"}</span>
+                  </span>
+                </button>
+                {!selecting && (
+                  <button
+                    onClick={() => setToDelete([c.id])}
+                    disabled={busyWith([c.id])}
+                    aria-label={`Delete “${c.title}”`}
+                    className="absolute top-1/2 right-1.5 -translate-y-1/2 rounded-lg p-1.5 text-faint opacity-0 transition-opacity group-hover:opacity-100 hover:text-danger focus-visible:opacity-100 disabled:pointer-events-none pointer-coarse:opacity-100"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                )}
+              </li>
+            );
+          })}
         </ul>
+        {selecting && (
+          <div className="mt-2 border-t border-line px-1 pt-2">
+            <Button variant="danger" size="sm" className="w-full" disabled={selected.size === 0 || busyWith([...selected])} onClick={() => setToDelete([...selected])}>
+              <Trash2 size={14} /> {selected.size > 1 ? `Delete ${selected.size} chats` : "Delete"}
+            </Button>
+          </div>
+        )}
       </Card>
+      <ConfirmDelete
+        titles={toDelete ? toDelete.map((id) => chats.find((c) => c.id === id)?.title ?? "A chat") : null}
+        busy={deleting}
+        onConfirm={remove}
+        onCancel={() => setToDelete(null)}
+      />
 
       <Card className="flex min-h-0 flex-col overflow-hidden">
         {!current ? (
