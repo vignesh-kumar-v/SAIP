@@ -198,6 +198,7 @@ export type ChatAction = {
   content: string;
   diff: string | null;
   exists: boolean;
+  warning?: string | null;
   state: ActionState;
   detail?: string;
   undoable: boolean;

@@ -20,7 +20,7 @@ from pathlib import Path
 MAX_CHATS = 20
 MAX_MESSAGE = 4000
 WEB_TOOLS = {"web_search": "A web search", "fetch_page": "A page that was opened"}
-ACTION_FIELDS = ("name", "title", "path", "content", "diff", "exists", "state", "detail")
+ACTION_FIELDS = ("name", "title", "path", "content", "diff", "exists", "warning", "state", "detail")
 
 
 def _undo_write(undo: dict) -> tuple[bool, str]:

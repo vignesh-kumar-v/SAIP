@@ -483,3 +483,12 @@ def test_deleting_chats_over_http(tmp_path, sandbox):  # noqa: F811
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_the_page_sees_the_warning_on_a_file_that_runs_code(rig):
+    propose(rig, "write_file", write_args(rig, "package.json", "{}"))
+    act = rig.api.chat_send(rig.cid, "add a script")["items"][1]["action"]
+    assert act["state"] == "pending" and "npm runs its scripts" in act["warning"]
+    propose(rig, "write_file", write_args(rig, "notes.md"))
+    rig.api.chat_action(rig.cid, 2, False)
+    assert rig.api.chat_send(rig.cid, "a note then")["items"][-2]["action"]["warning"] is None

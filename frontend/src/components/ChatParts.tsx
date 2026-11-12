@@ -1,6 +1,6 @@
 // Pieces of the Chat page: the conversation items, the action card and the rewind confirm.
 import * as Dialog from "@radix-ui/react-dialog";
-import { Activity, ClipboardCopy, FilePenLine, FileText, GitBranch, Globe, MonitorSmartphone, Pencil, Quote, Reply, Undo2, Wrench } from "lucide-react";
+import { Activity, ClipboardCopy, FilePenLine, FileText, GitBranch, Globe, MonitorSmartphone, Pencil, Quote, Reply, TriangleAlert, Undo2, Wrench } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ChatAction, ChatItem, ChatView, RewindPreview } from "../lib/types";
 import { Markdown } from "./Markdown";
@@ -153,6 +153,12 @@ export function ActionCard({ item, busy, locked, onDecide }: { item: ChatItem; b
         <div className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-ink">{a.title}</div>
         <Pill tone={pill.tone}>{pill.label}</Pill>
       </div>
+      {a.warning && (
+        <div role="note" className="flex items-start gap-2.5 border-t border-line bg-stuck-soft px-4 py-2.5 text-[12.5px] leading-relaxed text-ink">
+          <TriangleAlert size={15} className="mt-0.5 shrink-0 text-stuck" />
+          <span>{a.warning}</span>
+        </div>
+      )}
       <div className="border-t border-line px-4 py-3">
         <div className="mb-2 flex items-center gap-3">
           {write && a.path && <span className="num min-w-0 flex-1 truncate text-[12px] text-muted">{a.path}{!a.exists && <span className="text-faint"> · new file</span>}</span>}
@@ -175,7 +181,7 @@ export function ActionCard({ item, busy, locked, onDecide }: { item: ChatItem; b
         {a.state === "pending" ? (
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="primary" size="sm" busy={busy} disabled={locked} onClick={() => onDecide(true)}>
-              {write ? "Approve: write this file" : "Approve: copy to clipboard"}
+              {write ? (a.warning ? "Approve anyway: write this file" : "Approve: write this file") : "Approve: copy to clipboard"}
             </Button>
             <Button variant="ghost" size="sm" disabled={busy || locked} onClick={() => onDecide(false)}>
               Don't

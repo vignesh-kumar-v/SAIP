@@ -255,6 +255,7 @@ class Api:
             items.append({"kind": "action", "text": pv.get("title") or p["name"], "_call": p["call_id"], "_args": p["arguments"],
                           "action": {"name": p["name"], "title": pv.get("title") or p["name"], "path": pv.get("path"),
                                      "content": pv.get("content"), "diff": pv.get("diff"), "exists": bool(pv.get("exists")),
+                                     "warning": pv.get("warning"),
                                      "state": "pending", "detail": None}})
         if out["text"]:
             items.append({"kind": "assistant", "text": out["text"]})
