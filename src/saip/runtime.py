@@ -27,7 +27,7 @@ from llm.calibration import load_temperatures
 from llm.client import LLMError, OpenAIChatClient
 from llm.config import load_settings, user_config_dir
 from llm.context import build_context
-from llm.helper import give_help
+from llm.helper import give_help_with_tools
 from llm.privacy import shown
 from llm.proposal import FALLBACK, propose
 from llm.replay import MockClient
@@ -230,13 +230,20 @@ class Runtime:
         def help_out(offer):
             screen = look() or seen.get("screen")
             try:
-                text = give_help(client, offer.proposal.task, seen.get("context", ""), screen)
+                from .chat_tools import Toolbox
+                box = Toolbox(settings, self, plat).reading_only()
+                if getattr(self, "tools_unsupported", False) or opts.mock_llm:
+                    box.names = []
+                text, looked = give_help_with_tools(client, offer.proposal.task, seen.get("context", ""), screen,
+                                                    box.schemas(), box.run)
             except LLMError as e:
                 print(f"{_stamp()}  could not write the help ({e})")
                 return
             print(f"          help: {text}")
             shot = {"app": shown(screen.app, blocked), "text": screen.text} if screen is not None else None
-            session = self.chats.create(offer.proposal.task, seen.get("context", ""), shot, first=text)
+            for e in looked:
+                print(f"          ({e['label']})")
+            session = self.chats.create(offer.proposal.task, seen.get("context", ""), shot, first=text, looked=looked)
             bus.publish("help", text=text, session=session, task=offer.proposal.task)
             if cfg.notify_offers:
                 threading.Thread(target=plat.notify, args=("SAIP: help is ready", text[:200]), daemon=True).start()

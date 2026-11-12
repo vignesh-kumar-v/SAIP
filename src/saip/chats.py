@@ -29,14 +29,17 @@ class Chats:
         self._chats: dict[int, dict] = {}
 
     def create(self, title: str, context: str = "", screen: dict | None = None, first: str | None = None,
-               live: bool = False) -> int:
-        """`live`: started from the page, so the activity summary is refreshed on every message."""
+               live: bool = False, looked: list[dict] | None = None) -> int:
+        """`live`: started from the page, so the activity summary is refreshed on every message.
+        `looked`: what the model read while writing `first` ({"name", "label", "ok"}), shown above it."""
         with self._lock:
             cid = next(self._ids)
             now = time.time()
             self._chats[cid] = {"id": cid, "title": (title or "New chat")[:80], "created": now, "context": context,
                                 "screen": screen, "live": live, "first": first or None, "items": [], "wire": [],
                                 "next_item": 1}
+            for e in looked or []:
+                self._append(self._chats[cid], "tool", e["label"], tool={"name": e["name"], "label": e["label"], "ok": e["ok"]})
             if first:
                 self._append(self._chats[cid], "assistant", first)
             for old in sorted(self._chats)[:-MAX_CHATS]:

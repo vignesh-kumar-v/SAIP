@@ -322,3 +322,44 @@ def test_the_demo_settings_take_a_search_key_without_keeping_it():
     assert demo.settings()["llm"]["chat_tools"] is True and demo.settings()["llm"]["search_api_key_set"] is False
     out = demo.save_settings({"llm": {"search_provider": "brave", "search_api_key": "k-secret"}})
     assert out["settings"]["llm"]["search_api_key_set"] is True and "k-secret" not in json.dumps(out)
+
+
+def test_help_after_an_offer_may_read_first_but_never_proposes(tmp_path):
+    import dataclasses
+
+    from llm.config import AgentConfig, LLMConfig, Settings
+    from llm.helper import give_help_with_tools
+    from saip.chat_tools import READ_TOOLS, Toolbox
+    from saip.chats import Chats
+    (tmp_path / "notes.md").write_text("The parser drops the last header.")
+    settings = Settings(LLMConfig(chat_tools=True), agent=AgentConfig(watch_roots=(str(tmp_path),)))
+    box = Toolbox(settings).reading_only()
+    assert box.names and all(n in READ_TOOLS for n in box.names) and "write_file" not in box.names
+
+    class Model:
+        def __init__(self):
+            self.replies = [{"content": "", "tool_calls": [{"id": "c1", "name": "read_file", "arguments": {"path": "notes.md"}}],
+                             "finish_reason": "tool_calls"},
+                            {"content": "Your parser loses the last header: check the loop bound.", "tool_calls": [],
+                             "finish_reason": "stop"}]
+            self.sent = []
+
+        def chat(self, messages, tools=None, **kw):
+            self.sent.append((list(messages), tools))
+            return self.replies.pop(0)
+
+    m = Model()
+    text, looked = give_help_with_tools(m, "Explain the bug", "Activity: 9 switches.", None, box.schemas(), box.run)
+    assert text.startswith("Your parser loses") and [e["name"] for e in looked] == ["read_file"] and looked[0]["ok"]
+    assert "The parser drops the last header." in m.sent[1][0][-1]["content"]
+    assert all(t["function"]["name"] in READ_TOOLS for t in m.sent[0][1])
+    chats = Chats()
+    cid = chats.create("Explain the bug", "ctx", None, first=text, looked=looked)
+    assert [i["kind"] for i in Chats.view(chats.get(cid))["items"]] == ["tool", "assistant"]
+
+    class Plain:
+        def complete(self, messages, **kw):
+            from llm.client import Choice
+            return [Choice("Plain help.", finish_reason="stop")]
+
+    assert give_help_with_tools(Plain(), "t", "c", None, [], None) == ("Plain help.", [])

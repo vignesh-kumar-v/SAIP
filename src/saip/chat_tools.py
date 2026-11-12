@@ -134,6 +134,11 @@ class Toolbox:
                 names += ["web_search", "fetch_page"]
         self.names = names
 
+    def reading_only(self) -> "Toolbox":
+        """This toolbox without the actions that need approval (for the help written right after "Help me")."""
+        self.names = [n for n in self.names if n in READ_TOOLS]
+        return self
+
     @property
     def roots(self) -> list[str]:
         return list(self.settings.agent.watch_roots)
