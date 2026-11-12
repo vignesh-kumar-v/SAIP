@@ -20,6 +20,11 @@ FEATURES = {"circling": 8.0, "revisits": 1.5, "toggling": 0.5, "stalling": 0.4, 
 
 class _DemoRuntime:
     def __init__(self):
+        from .chats import Chats
+        self.chats = Chats()
+        self.client = object()
+        self.last_context = "Activity over the last 5 minutes: 14 app switches between Code and Google Chrome."
+        self.look = lambda: None
         self.inspector: deque = deque(maxlen=50)
         self.opts = None
         self.started_at = time.time()
@@ -138,6 +143,18 @@ class DemoApi(Api):
 
     def autostart(self) -> dict:
         return {"enabled": self.auto, "where": "~/Library/LaunchAgents/dev.saip.agent.plist (demo)"}
+
+    def chat_send(self, cid, message):
+        c = self.runtime.chats
+        if c.get(cid) is None:
+            raise ApiError(404, "no such conversation")
+        if not str(message).strip():
+            raise ApiError(400, "write a message first")
+        time.sleep(0.8)
+        c.add(cid, "user", str(message).strip())
+        c.add(cid, "assistant", "In the demo I can't read your work, but here's how I'd start: say in one sentence what you "
+                                "expected to happen, then what happened instead. The gap between the two is usually the next step.")
+        return self.chat_get(cid)
 
     # ---- changing (in memory only) ----
     def save_settings(self, body: dict) -> dict:
@@ -284,8 +301,8 @@ def demo_loop(bus, api: DemoApi, speed: float = 1.0) -> None:
                 if outcome == "accepted":
                     text = ("Name the one thing you expected to see in the second window and did not. If you can say "
                             "it in a sentence, start there; if not, tell me what each window is for.")
-                    bus.publish("help", text=text)
-                    bus.ask("SAIP", text, ("Close", "Copy"), 180)
+                    sid = api.runtime.chats.create("Talk through the next step", api.runtime.last_context, None, first=text)
+                    bus.publish("help", text=text, session=sid, task="Talk through the next step")
                 score = 0.1
             else:
                 bus.publish("inspector", count=len(api.runtime.inspector))

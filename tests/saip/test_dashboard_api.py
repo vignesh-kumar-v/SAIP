@@ -348,3 +348,145 @@ def test_repositories_you_have_not_decided_on_are_reported_then_settled(sandbox)
     assert len(setup_mod.repo_overview()["undecided"]) == 2
     setup_mod.repo_add(str(sandbox / "work"))
     assert setup_mod.repo_overview()["undecided"] == []
+
+
+# ---------------------------------------------------------------------------------------------------- chat, excerpts, notifications
+def test_a_reply_cut_at_the_token_limit_is_retried_then_trimmed():
+    from llm.client import Choice
+    from llm.text import complete_text, whole_sentences
+    calls = []
+
+    class Cut:
+        def complete(self, messages, *, max_tokens=1, temperature=0.0, **_):
+            calls.append(max_tokens)
+            return [Choice("First point. Second point that never", finish_reason="length")]
+
+    assert complete_text(Cut(), [], max_tokens=50, temperature=0) == "First point."
+    assert calls == [50, 100]
+
+    class Whole:
+        def complete(self, messages, *, max_tokens=1, temperature=0.0, **_):
+            return [Choice("All  done.", finish_reason="stop")]
+
+    assert complete_text(Whole(), [], max_tokens=50, temperature=0) == "All done."
+    assert whole_sentences("No full stop here") == "No full stop here"
+    assert whole_sentences('He said "stop." Then') == 'He said "stop."'
+
+
+def test_screen_excerpts_start_and_end_on_clean_boundaries_and_mark_the_cursor():
+    from saip.screen import CURSOR, CUT, window_text
+    t = ("The results show that the method improves recall on all benchmarks. In addition we find that the gain is "
+         "largest when the training set is small, which suggests that the model generalises from fewer examples. "
+         "However the effect disappears when the labels are noisy.")
+    cur = t.index("suggests that the model") + len("suggests that the model")
+    out = window_text(t, cur, 120, tail=False)
+    assert out.startswith(CUT) and out.endswith(CUT) and f"model{CURSOR}" in out
+    inner = out[len(CUT):-len(CUT)].strip().replace(CURSOR, "")
+    assert inner in t and not inner.startswith(("esults", "he ")) and inner[0].isupper() or inner[0] == "t"
+    assert window_text("hello world", 5, 50, tail=False) == f"hello{CURSOR} world"
+    assert window_text(t, 0, 60, tail=True).startswith(CUT)
+
+
+def test_typed_text_starts_on_a_whole_word():
+    from saip.typing_monitor import TypingMonitor
+    m = TypingMonitor(foreground=lambda: "Code", clip_chars=14)
+    m.refresh_allowed()
+    for ch in "the quick brown fox":
+        m.handle_key(type("K", (), {"char": ch, "name": None})())
+    assert m.get_current_text() == "brown fox"
+
+
+def test_the_prompts_say_the_excerpt_is_a_window():
+    from llm import chat, helper, proposal
+    for prompt in (helper.SYSTEM, chat.SYSTEM, proposal.SYSTEM):
+        assert "[…]" in prompt and "▌" in prompt
+
+
+def test_conversations_start_after_help_and_the_model_answers(sandbox):
+    from llm.client import Choice
+    from saip.chats import Chats
+    seen = {}
+
+    class Model:
+        def complete(self, messages, *, max_tokens=1, temperature=0.0, **_):
+            seen["messages"] = messages
+            return [Choice("Try naming the one thing you expected.", finish_reason="stop")]
+
+    rt = type("RT", (), {"chats": Chats(), "client": Model(), "last_context": "Activity: 14 switches.",
+                         "look": staticmethod(lambda: None)})()
+    api = server.Api(Bus(), plat=FakePlatform(None), aw=FakeAW(up=False), runtime=rt)
+    cid = rt.chats.create("Talk it through", "Activity: 14 switches.", {"app": "TextEdit", "text": "a draft▌"}, first="Here is a start.")
+    assert [m["role"] for m in api.chat_get(cid)["messages"]] == ["assistant"]
+    out = api.chat_send(cid, "I am not sure what to do next")
+    assert [m["role"] for m in out["messages"]] == ["assistant", "user", "assistant"]
+    sent = seen["messages"]
+    assert sent[0]["role"] == "system" and "Activity: 14 switches." in sent[1]["content"] and "a draft▌" in sent[1]["content"]
+    assert sent[-1] == {"role": "user", "content": "I am not sure what to do next"}
+    assert "context" not in out and out["has_screen"] is True
+    assert api.chats()["chats"][0]["id"] == cid and api.chats()["available"] is True
+    assert api.chat_new("Another")["messages"] == []
+    for bad in (lambda: api.chat_send(999, "hi"), lambda: api.chat_send(cid, "  ")):
+        with pytest.raises(server.ApiError):
+            bad()
+    rt.client = None
+    with pytest.raises(server.ApiError):
+        api.chat_send(cid, "hello?")
+
+
+def test_chats_work_over_http(api_server):
+    base, api, _ = api_server
+    assert _call(base, "/api/chats")[0] == 409                    # no agent attached to this server
+    from saip.demo import DemoApi
+    demo = DemoApi(Bus())
+    httpd = server.start(demo.bus, 0, api=demo)
+    b = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        cid = _call(b, "/api/chats", {"title": "Hi"})[1]["id"]
+        out = _call(b, f"/api/chats/{cid}", {"message": "help me"})[1]
+        assert [m["role"] for m in out["messages"]] == ["user", "assistant"]
+        assert _call(b, f"/api/chats/{cid}")[1]["title"] == "Hi" and _call(b, "/api/chats/x")[0] == 404
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_every_offer_sends_a_notification_unless_switched_off(sandbox, monkeypatch):
+    import time as _time
+
+    from saip import offers, runtime
+    from test_app import NOW, healthy_aw
+    monkeypatch.setattr(offers, "user_config_dir", lambda: sandbox / "cfg")
+    monkeypatch.setattr(runtime, "user_config_dir", lambda: sandbox / "cfg")
+    monkeypatch.setattr(_time, "time", lambda: NOW)
+    from llm.client import Choice
+
+    class AlwaysYes:
+        def complete(self, messages, *, max_tokens=1, temperature=0.0, logprobs=False, n=1, **_):
+            if n > 1:
+                return [Choice("Yes") for _ in range(n)]
+            return [Choice("Yes", {"Yes": -0.001, "No": -9.0} if logprobs else None)]
+
+    monkeypatch.setattr(runtime, "MockClient", AlwaysYes)
+
+    def run(setting):
+        (sandbox / "private.toml").write_text(f"[agent]\ntick_s = 0.05\nassess_interval_s = 0\nnotify_offers = {setting}\n"
+                                              '[llm]\nbase_url = "http://x/v1"\nmodel = "m"\n')
+        sent = []
+        plat = FakePlatform(None)
+        plat.notify = lambda title, message: sent.append((title, message)) or True
+        plat.can_ask = lambda: False
+        rt = runtime.Runtime(Bus(), plat, healthy_aw(), runtime.RunOptions(mock_llm=True, trigger=0.0, no_dialog=True,
+                                                                            config=str(sandbox / "private.toml")))
+        rt.start()
+        try:
+            end = _real_time() + 10
+            while _real_time() < end and not sent and setting == "true":
+                _sleep(0.05)
+            _sleep(0.4)
+        finally:
+            rt.stop()
+        return sent
+
+    on, off = run("true"), run("false")
+    assert on and on[0][0] == "SAIP" and on[0][1]
+    assert off == []

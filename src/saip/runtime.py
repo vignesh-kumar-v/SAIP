@@ -36,6 +36,7 @@ from . import offers as offers_mod
 from . import prompts as repo_prompts
 from . import repos as repos_mod
 from . import setup as setup_mod
+from .chats import Chats
 from .agent import NotReady, Orchestrator, describe, fetch_trace, score_now
 from .aw import AWError
 from .hooks import githook
@@ -99,6 +100,11 @@ class Runtime:
         self.bus, self.plat, self.aw, self.opts = bus, plat, aw, opts or RunOptions()
         self.ui = ui or plat                  # dialogs: the dashboard when one is open, else the system's own
         self.inspector: deque = deque(maxlen=INSPECTOR_KEPT)
+        self.chats = Chats()
+        self.client = None                    # the model in use while the agent runs (the chat page talks to it)
+        self.last_context = ""                # the newest activity summary, as the model saw it
+        self.last_screen = None               # and the newest screen text
+        self.look = lambda: None
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -192,6 +198,7 @@ class Runtime:
                 print(f"Typed-text monitor not started: {e}", flush=True)
                 monitor = None
         self.monitor = monitor
+        self.client = client
         self._changed()
 
         seen = {"screen_warned": False}
@@ -206,6 +213,8 @@ class Runtime:
                 print(f"{_stamp()}  screen text not used: {why}")
             return screen
 
+        self.look = look
+
         def help_out(offer):
             screen = look() or seen.get("screen")
             try:
@@ -214,8 +223,13 @@ class Runtime:
                 print(f"{_stamp()}  could not write the help ({e})")
                 return
             print(f"          help: {text}")
-            bus.publish("help", text=text)
-            if presenter.dialog and ui.ask("SAIP", text, ("Close", "Copy"), timeout=180, default=False) == "Copy":
+            shot = {"app": shown(screen.app, blocked), "text": screen.text} if screen is not None else None
+            session = self.chats.create(offer.proposal.task, seen.get("context", ""), shot, first=text)
+            bus.publish("help", text=text, session=session, task=offer.proposal.task)
+            if cfg.notify_offers:
+                threading.Thread(target=plat.notify, args=("SAIP: help is ready", text[:200]), daemon=True).start()
+            if presenter.dialog and bus.pages == 0 and ui.ask("SAIP", text, ("Close", "Copy"), timeout=180,
+                                                              default=False) == "Copy":
                 copy_to_clipboard(text)
 
         def answered(offer, outcome):
@@ -273,6 +287,7 @@ class Runtime:
                         typed = typed_for_model(typed_text)
                         seen["context"] = build_context(trace, tick.time, llm.lookback_s, llm.include_titles,
                                                         blocked, typed_text=typed)
+                        self.last_context = seen["context"]
                         probe.update(context=seen["context"], typed=bool(typed))
                         return assess(client, settings, temps, seen["context"], tick.stuck_score)
                     try:
@@ -308,8 +323,8 @@ class Runtime:
                                               "generated": proposal.generated}
                             bus.publish("offer", message=proposal.message, task=proposal.task,
                                         generated=proposal.generated, app=app)
-                            if not presenter.dialog and opts.notify:
-                                plat.notify("SAIP", proposal.message)
+                            if cfg.notify_offers or (not presenter.dialog and opts.notify):
+                                threading.Thread(target=plat.notify, args=("SAIP", proposal.message), daemon=True).start()
                             presenter.submit(offers_mod.make_offer(now, d, ev.assessment.resampled, proposal))
                         bus.publish("inspector", count=len(self.inspector))
                 if now - last_status >= 60:
@@ -325,3 +340,4 @@ class Runtime:
             if monitor is not None:
                 monitor.stop()
             self.monitor = None
+            self.client = None

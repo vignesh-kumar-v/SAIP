@@ -22,6 +22,7 @@ class LLMError(RuntimeError):
 class Choice:
     text: str
     first_token_logprobs: dict | None = None     # {token: logprob} for the top candidates of the first token
+    finish_reason: str | None = None             # "stop", or "length" when the reply was cut at max_tokens
 
 
 class ChatClient(Protocol):
@@ -73,5 +74,5 @@ def parse_choices(data: dict, want_logprobs: bool) -> list[Choice]:
         if want_logprobs and not top:
             raise LLMError("the endpoint returned no log-probabilities; the confidence step needs a server "
                            "that supports logprobs (vLLM, llama.cpp server, Ollama /v1)")
-        out.append(Choice(text=text, first_token_logprobs=top))
+        out.append(Choice(text=text, first_token_logprobs=top, finish_reason=c.get("finish_reason")))
     return out

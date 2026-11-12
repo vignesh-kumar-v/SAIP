@@ -8,6 +8,7 @@ Reading
     GET  /api/decisions        every gate decision (decisions.jsonl)
     GET  /api/export           ?what=offers|decisions&format=csv|jsonl, as a download
     GET  /api/inspector        the last model checks: the exact context sent, the answers, the offer (memory only)
+    GET  /api/chats            the conversations of this run; GET /api/chats/<id> one of them with its messages
     GET  /api/health           what `saip doctor` checks, as rows
     GET  /api/settings         private.toml as the page may see it (the API key only as set / not set)
     GET  /api/apps             installed apps (marked if ActivityWatch has seen them), with the block list
@@ -15,6 +16,7 @@ Reading
 
 Changing
     POST /api/asks/<id>        {"button": "Help me"} answers an open question
+    POST /api/chats            {"title"?} starts a conversation; POST /api/chats/<id> {"message"} sends one and returns the reply
     POST /api/pause            {"minutes": 60} holds new offers back; {"minutes": 0} lets them through again
     POST /api/settings         {"llm": {...}, "agent": {...}, "gate": {...}} writes private.toml and reloads the agent
     POST /api/setup/aw         {"action": "install" | "start"}
@@ -176,6 +178,54 @@ class Api:
                 "model": settings.llm.model or None, "config": str(settings.path) if settings.path else None,
                 "runtime": self.runtime.status() if self.runtime else None, "autostart": autostart.is_enabled(),
                 "monitor_typed_content": settings.agent.monitor_typed_content, "quiet_until": self.bus.quiet_until}
+
+    # ---- conversations ----
+    def _chats(self):
+        if self.runtime is None or not hasattr(self.runtime, "chats"):
+            raise ApiError(409, "no agent is running, so there is nothing to talk to")
+        return self.runtime.chats
+
+    def chats(self) -> dict:
+        rt = self.runtime
+        return {"chats": self._chats().listing(), "available": bool(rt and getattr(rt, "client", None))}
+
+    def chat_get(self, cid: int) -> dict:
+        c = self._chats().get(cid)
+        if c is None:
+            raise ApiError(404, "no such conversation")
+        from .chats import Chats
+        return Chats.view(c)
+
+    def chat_new(self, title: str | None = None) -> dict:
+        rt = self._chats() and self.runtime
+        screen = None
+        try:
+            found = rt.look()
+            screen = {"app": found.app, "text": found.text} if found is not None else None
+        except Exception:
+            screen = None
+        cid = rt.chats.create(title or "New chat", rt.last_context, screen)
+        return self.chat_get(cid)
+
+    def chat_send(self, cid: int, message: str) -> dict:
+        from llm.chat import chat_reply
+        from llm.client import LLMError
+        chats, rt = self._chats(), self.runtime
+        c = chats.get(cid)
+        if c is None:
+            raise ApiError(404, "no such conversation")
+        text = str(message).strip()
+        if not text:
+            raise ApiError(400, "write a message first")
+        if getattr(rt, "client", None) is None:
+            raise ApiError(409, "no model is connected: the agent is stopped or has no endpoint")
+        chats.add(cid, "user", text)
+        try:
+            reply = chat_reply(rt.client, c["context"], c["screen"], chats.get(cid)["messages"])
+        except LLMError as e:
+            raise ApiError(502, f"the model did not answer: {e}") from None
+        chats.add(cid, "assistant", reply or "I could not write a reply this time. Try again.")
+        return self.chat_get(cid)
 
     def decisions(self) -> dict:
         from . import offers
@@ -428,11 +478,18 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 "/api/app": api.app, "/api/decisions": api.decisions, "/api/inspector": api.inspector,
                 "/api/settings": api.settings, "/api/apps": api.apps, "/api/setup/status": api.setup_status,
                 "/api/setup/aw": api.aw_status, "/api/setup/hook": api.hook_status, "/api/repos": api.repos,
-                "/api/autostart": api.autostart,
+                "/api/autostart": api.autostart, "/api/chats": api.chats,
                 "/api/setup/permissions": lambda: api.permissions(q.get("typed", "1") == "1", q.get("screen", "1") == "1"),
                 "/api/export": lambda: api.export(q.get("what", "decisions"), q.get("format", "csv")),
             }
-            if path == "/api/events":
+            if path.startswith("/api/chats/"):
+                try:
+                    cid = int(path.rsplit("/", 1)[1])
+                except ValueError:
+                    self._json({"error": "not found"}, 404)
+                    return
+                self._reply(lambda: api.chat_get(cid))
+            elif path == "/api/events":
                 self._stream(q.get("client") == "tray")
             elif path in routes:
                 self._reply(routes[path])
@@ -504,6 +561,14 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 self._json({"ok": ok} if ok else {"ok": False, "error": "that question is no longer open"}, 200 if ok else 409)
                 return
             b = body if isinstance(body, dict) else {}
+            if parts[:2] == ["api", "chats"] and len(parts) == 3:
+                try:
+                    cid = int(parts[2])
+                except ValueError:
+                    self._json({"error": "not found"}, 404)
+                    return
+                self._reply(lambda: api.chat_send(cid, b.get("message", "")))
+                return
             routes = {
                 "/api/settings": lambda: api.save_settings(b),
                 "/api/setup/aw": lambda: api.aw_action(*_need(body, "action")),
@@ -513,6 +578,7 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 "/api/setup/hook": lambda: api.hook_action(*_need(body, "action")),
                 "/api/repos/preview": lambda: api.repo_preview(*_need(body, "folder")),
                 "/api/repos": lambda: api.repo_action(*_need(body, "action", "folder")),
+                "/api/chats": lambda: api.chat_new(b.get("title")),
                 "/api/setup/finish": api.finish,
                 "/api/autostart": lambda: api.set_autostart(bool(_need(body, "enabled")[0])),
                 "/api/shutdown": api.shutdown,

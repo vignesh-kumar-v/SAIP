@@ -129,7 +129,13 @@ class TypingMonitor:
     def get_current_text(self) -> str:
         """The newest `clip_chars` typed characters."""
         with self._lock:
-            return "".join(self._buffer)[-self.clip_chars:]
+            full = "".join(self._buffer)
+        text = full[-self.clip_chars:]
+        if len(full) > len(text) and not full[-len(text) - 1].isspace() and not text[0].isspace():
+            cut = text.find(" ", 0, 40)                  # the first word was cut in half: start at the next one
+            if cut != -1:
+                text = text[cut + 1:]
+        return text
 
     # ---- foreground check ------------------------------------------------------------
     def refresh_allowed(self) -> bool:
