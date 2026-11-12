@@ -40,6 +40,8 @@ class OpenAIChatClient:
                 "temperature": temperature, "n": n}
         if logprobs:
             body.update(logprobs=True, top_logprobs=top_logprobs)
+        if self.cfg.reasoning_effort:
+            body["reasoning_effort"] = self.cfg.reasoning_effort
         headers = {"Content-Type": "application/json"}
         if self.cfg.api_key:
             headers["Authorization"] = "Bearer " + self.cfg.api_key

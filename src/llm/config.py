@@ -43,6 +43,8 @@ class LLMConfig:
     private_apps: tuple = DEFAULT_PRIVATE_APPS
     read_screen: bool = False            # read the focused text when an offer is written
     screen_chars: int = 1200             # how much of it the model is shown
+    reasoning_effort: str = ""           # sent as-is when set: "none" stops a thinking model from reasoning first,
+                                         # so the first token is the yes/no answer the confidence step reads
 
 
 @dataclass(frozen=True)
