@@ -529,7 +529,10 @@ def repo_overview(python: str | None = None) -> dict:
     python = python or sys.executable
     agent = load_settings().agent
     states = repos_mod.inspect_all(repos_mod.discover(agent), python)
+    accepted, declined = decisions()
+    undecided = [s for s in states if repos_mod.key(s.path) not in accepted | declined and s.state != githook.SKIP]
     return {"roots": list(agent.watch_roots), "exclude": list(agent.exclude),
+            "undecided": [{"path": repos_mod.tilde(s.path), "state": s.state} for s in undecided],
             "suggestions": [p for p in dict.fromkeys(SUGGESTED_ROOTS) if Path(p).expanduser().is_dir()],
             "repos": [{"path": repos_mod.tilde(s.path), "state": s.state, "detail": s.detail} for s in states],
             "summary": repos_mod.summarise(states) if states else "no repositories found"}
@@ -569,6 +572,17 @@ def repo_add(folder: str, python: str | None = None) -> dict:
     agent = load_settings(cfg).agent
     update_manifest(hooked_repos=[str(r) for r in repos_mod.discover(agent) if githook.has_hook(r)])
     return {"ok": True, "detail": f"{len(todo)} hooked under {shown}" if todo else f"nothing new to hook under {shown}"}
+
+
+def repo_decline(folder: str) -> dict:
+    """Never hook the repositories under this folder, and stop asking about them."""
+    path = Path(folder).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(f"{folder} is not a folder")
+    agent = repos_mod.with_roots(load_settings().agent, [str(path)])
+    found = repos_mod.discover(agent)
+    record_decisions(decline=[repos_mod.key(r) for r in found])
+    return {"ok": True, "detail": f"{len(found)} repositories under {repos_mod.tilde(path)} will not be hooked"}
 
 
 def repo_remove(folder: str) -> dict:

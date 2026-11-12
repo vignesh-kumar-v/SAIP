@@ -73,6 +73,7 @@ export function Welcome() {
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const [undecided, setUndecided] = useState(0);
 
   useEffect(() => {
     get<Status>("/api/setup/status").then((s) => {
@@ -104,7 +105,7 @@ export function Welcome() {
 
   const step = STEPS[i].id;
   const modelOk = !!(model?.base_url && model?.model) && !!status;
-  const canNext = step !== "model" || modelOk;
+  const canNext = (step !== "model" || modelOk) && (step !== "repos" || undecided === 0);
 
   const go = async (to: number) => {
     if (to > i) {
@@ -212,7 +213,8 @@ export function Welcome() {
       case "repos":
         return (
           <Step kicker="Step 7 · optional" title="Git folders" lead="Pick the folder that holds your projects. Commits count as progress, which pulls the score back down.">
-            <ReposPanel />
+            <ReposPanel onUndecided={setUndecided} />
+            {undecided > 0 && <p className="mt-5 text-[12.5px] text-faint">Decide about these repositories to continue.</p>}
           </Step>
         );
       case "review":
@@ -247,7 +249,7 @@ export function Welcome() {
           </Step>
         );
     }
-  }, [step, model, modelOk, features, status, apps, blocked, health, done, finishError]);
+  }, [step, model, modelOk, features, status, apps, blocked, health, done, finishError, undecided]);
 
   if (!status) {
     return (

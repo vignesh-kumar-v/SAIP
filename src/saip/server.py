@@ -22,7 +22,7 @@ Changing
     POST /api/setup/permissions {"id": "Input Monitoring"} shows the OS prompt or opens its settings pane
     POST /api/setup/keytest    {"seconds": 6} counts key presses for a few seconds (no characters kept)
     POST /api/setup/hook       {"action": "install" | "remove"}
-    POST /api/repos/preview    {"folder"}; POST /api/repos {"action": "add" | "remove", "folder"}
+    POST /api/repos/preview    {"folder"}; POST /api/repos {"action": "add" | "remove" | "decline", "folder"}
     POST /api/setup/finish     marks setup done and starts the agent
     POST /api/autostart        {"enabled": true}
     POST /api/shutdown         stops SAIP (the agent, this server and the tray)
@@ -338,6 +338,8 @@ class Api:
                 out = setup.repo_add(str(folder))
             elif action == "remove":
                 out = setup.repo_remove(str(folder))
+            elif action == "decline":
+                out = setup.repo_decline(str(folder))
             else:
                 raise ApiError(400, "expected action add or remove")
         except ValueError as e:

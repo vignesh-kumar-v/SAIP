@@ -333,3 +333,18 @@ def test_the_agent_publishes_ticks_with_the_app_and_logs_each_decision(sandbox, 
     entry = rt.inspector[0]
     assert entry["context"].startswith("Activity over the last") and not rt.running
     assert any(e["kind"] == "app" for e in snap["log"])
+
+
+def test_repositories_you_have_not_decided_on_are_reported_then_settled(sandbox):
+    import subprocess
+    (sandbox / "work").mkdir()
+    for n in ("a", "b"):
+        subprocess.run(["git", "init", "-q", str(sandbox / "work" / n)], check=True)
+    (sandbox / "private.toml").write_text(f'[agent]\nwatch_roots = [{json.dumps(str(sandbox / "work"))}]\n')
+    assert len(setup_mod.repo_overview()["undecided"]) == 2
+    setup_mod.repo_decline(str(sandbox / "work"))
+    assert setup_mod.repo_overview()["undecided"] == []
+    setup_mod.record_decisions(forget=[k for k in setup_mod.decisions()[1]])
+    assert len(setup_mod.repo_overview()["undecided"]) == 2
+    setup_mod.repo_add(str(sandbox / "work"))
+    assert setup_mod.repo_overview()["undecided"] == []

@@ -343,11 +343,25 @@ export function HookPanel() {
 }
 
 // ---- git folders ----
-type Repos = { roots: string[]; exclude: string[]; suggestions: string[]; repos: RepoRow[]; summary: string };
+type Repos = { roots: string[]; exclude: string[]; suggestions: string[]; repos: RepoRow[]; summary: string; undecided: { path: string; state: string }[] };
 type Preview = { folder: string; count: number; too_many: boolean; summary: string; repos: RepoRow[] };
 
-export function ReposPanel() {
+export function ReposPanel({ onUndecided }: { onUndecided?: (n: number) => void }) {
   const { data, reload } = useJson<Repos>("/api/repos");
+  useEffect(() => {
+    if (data) onUndecided?.(data.undecided.length);
+  }, [data, onUndecided]);
+  const decideAll = async (action: "add" | "decline") => {
+    setBusy("all-" + action);
+    setError(null);
+    try {
+      for (const r of data?.roots || []) await post("/api/repos", { action, folder: r });
+    } catch (e: any) {
+      setError(e.message);
+    }
+    setBusy(null);
+    reload();
+  };
   const [folder, setFolder] = useState("");
   const [preview, setPreview] = useState<Preview | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -381,6 +395,36 @@ export function ReposPanel() {
   if (!data) return <div className="h-24 animate-pulse rounded-xl bg-raised" />;
   return (
     <div className="space-y-3">
+      <AnimatePresence>
+        {data.undecided.length > 0 && (
+          <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden rounded-2xl border border-stuck/45 bg-stuck-soft p-4">
+            <div className="flex items-start gap-3">
+              <FolderGit2 size={18} className="mt-0.5 shrink-0 text-stuck" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[14.5px] font-medium text-ink">
+                  Found {data.undecided.length} git {data.undecided.length === 1 ? "repository" : "repositories"} you haven't decided on
+                </div>
+                <p className="mt-1 text-[13px] leading-relaxed text-muted">
+                  Add them and SAIP puts a small git hook in each that records only the word “commit” when you commit. Skip them and SAIP never asks about these again.
+                </p>
+                <ul className="scroll-thin mt-2.5 max-h-28 overflow-auto">
+                  {data.undecided.map((r) => (
+                    <li key={r.path} className="num truncate py-0.5 text-[12px] text-muted">{r.path}</li>
+                  ))}
+                </ul>
+                <div className="mt-3.5 flex flex-wrap gap-2">
+                  <Button size="sm" variant="primary" busy={busy === "all-add"} onClick={() => decideAll("add")}>
+                    Add all {data.undecided.length}
+                  </Button>
+                  <Button size="sm" variant="subtle" busy={busy === "all-decline"} onClick={() => decideAll("decline")}>
+                    Don't add these
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {data.roots.length > 0 && (
         <ul className="space-y-1.5">
           {data.roots.map((r) => (

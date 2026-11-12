@@ -55,6 +55,7 @@ class DemoApi(Api):
                     "path": "(demo: nothing is written)"}
         self.hook = False
         self.roots = list(self.cfg["agent"]["watch_roots"])
+        self.undecided = ["~/Developer/saip", "~/Developer/notes", "~/Developer/site"] if self.roots else []
         self.auto = False
         self.offers = self._offers
         self.health = lambda: {"checks": [{"name": "demo", "status": "ok",
@@ -130,7 +131,8 @@ class DemoApi(Api):
         return {"shell": "zsh", "profile": "~/.zshrc", "supported": True, "installed": self.hook}
 
     def repos(self) -> dict:
-        return {"roots": self.roots, "exclude": [], "suggestions": ["~/Developer", "~/projects"],
+        return {"roots": self.roots, "exclude": [], "undecided": [{"path": p, "state": "ready"} for p in self.undecided],
+                "suggestions": ["~/Developer", "~/projects"],
                 "repos": [{"path": f"{r}/saip", "state": "installed", "detail": ""} for r in self.roots],
                 "summary": f"{len(self.roots)} repositories: {len(self.roots)} hooked" if self.roots else "no repositories found"}
 
@@ -183,6 +185,8 @@ class DemoApi(Api):
                 "repos": [{"path": f"{folder}/{n}", "state": "ready", "detail": ""} for n in ("saip", "notes", "site")]}
 
     def repo_action(self, action, folder):
+        if action in ("add", "decline"):
+            self.undecided = []
         if action == "add" and folder not in self.roots:
             self.roots.append(folder)
         if action == "remove":
