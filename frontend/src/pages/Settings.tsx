@@ -13,6 +13,7 @@ const SECTIONS = [
   ["model", "Model"],
   ["features", "What it reads"],
   ["privacy", "Blocked apps"],
+  ["notifications", "Notifications"],
   ["activitywatch", "ActivityWatch"],
   ["repos", "Git & terminal"],
   ["behaviour", "Timing & gate"],
@@ -193,6 +194,31 @@ function Behaviour({ s, reload }: { s: SettingsT; reload: () => void }) {
   );
 }
 
+function Notifications({ s, reload }: { s: SettingsT; reload: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [flash, show] = useFlash();
+  const set = async (on: boolean) => {
+    setBusy(true);
+    await post("/api/settings", { agent: { notify_offers: on } }).catch(() => {});
+    setBusy(false);
+    show();
+    reload();
+  };
+  return (
+    <Section id="notifications" title="Notifications" lead="A system notification with each offer, so you see it even when the dashboard is in the background." right={<SavedFlash show={flash} />}>
+      <div className="flex items-center gap-4 rounded-xl border border-line px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px] text-ink">Notify me when SAIP offers help</div>
+          <div className="text-[12px] text-faint">
+            On macOS the first one may need approving in System Settings → Notifications, for the app SAIP runs from (Script Editor or your terminal).
+          </div>
+        </div>
+        <Toggle checked={s.agent.notify_offers} disabled={busy} onChange={set} label="Notify me when SAIP offers help" />
+      </div>
+    </Section>
+  );
+}
+
 function Startup() {
   const app = useLive((s) => s.app);
   const { data, reload } = useJson<{ enabled: boolean; where: string }>("/api/autostart");
@@ -312,6 +338,7 @@ export function Settings() {
             </Section>
             <Features s={s} reload={refresh} />
             <Privacy reload={refresh} />
+            <Notifications s={s} reload={refresh} />
             <Section id="activitywatch" title="ActivityWatch" lead="Where SAIP's activity data comes from.">
               <ActivityWatchPanel />
             </Section>

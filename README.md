@@ -172,6 +172,8 @@ process that uses only the API. Tested on macOS; the Windows and Linux paths are
 covered by unit tests but have not been run on those systems since this rewrite. On GNOME the icon needs the
 AppIndicator extension.
 
+**Chat and notifications.** Each offer also sends a system notification (switch off in Settings or with `notify_offers = false` under `[agent]`), so it is seen with the dashboard in the background. "Help me" opens a conversation in the dashboard's Chat page, seeded with the help, the activity summary and the screen text; you can also start one from there. Conversations are kept in memory for the run and the model only writes words. Screen text is cut at line, sentence or word boundaries, with `[…]` where SAIP cut it and `▌` at the cursor, and a reply the endpoint cut at its token limit is retried once and then trimmed to its last full sentence.
+
 **Launch at login.** Off by default; switch it on from the tray or Settings. It adds a LaunchAgent on macOS, a
 value under the user's `Run` registry key on Windows, or an XDG autostart entry on Linux, and starts
 `saip run --no-browser`. `saip uninstall` removes it.

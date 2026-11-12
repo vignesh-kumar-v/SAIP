@@ -7,6 +7,7 @@ import { Live } from "./pages/Live";
 
 const History = lazy(() => import("./pages/History").then((m) => ({ default: m.History })));
 const Inspector = lazy(() => import("./pages/Inspector").then((m) => ({ default: m.Inspector })));
+const Chat = lazy(() => import("./pages/Chat").then((m) => ({ default: m.Chat })));
 const Settings = lazy(() => import("./pages/Settings").then((m) => ({ default: m.Settings })));
 const Welcome = lazy(() => import("./pages/Welcome").then((m) => ({ default: m.Welcome })));
 
@@ -42,7 +43,7 @@ export function App() {
   return (
     <Shell>
       <Suspense fallback={<Loading />}>
-        {path.startsWith("/history") ? <History /> : path.startsWith("/inspector") ? <Inspector /> : path.startsWith("/settings") ? <Settings /> : <Live />}
+        {path.startsWith("/chat") ? <Chat /> : path.startsWith("/history") ? <History /> : path.startsWith("/inspector") ? <Inspector /> : path.startsWith("/settings") ? <Settings /> : <Live />}
       </Suspense>
     </Shell>
   );

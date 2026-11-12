@@ -1,5 +1,5 @@
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import { Activity, History, Monitor, Moon, PauseCircle, PlayCircle, ScanSearch, Settings2, Sun } from "lucide-react";
+import { Activity, History, MessageCircle, Monitor, Moon, PauseCircle, PlayCircle, ScanSearch, Settings2, Sun, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { post } from "../lib/api";
@@ -7,10 +7,12 @@ import { clock } from "../lib/format";
 import { Link, usePath } from "../lib/router";
 import { STATE_WORDS, stateOf, useLive } from "../lib/store";
 import { AskStack } from "./Signals";
-import { Mark, STATE_COLOR, cx } from "./ui";
+import { Button, Mark, STATE_COLOR, cx } from "./ui";
+import { navigate } from "../lib/router";
 
 const NAV = [
   { to: "/", label: "Live", icon: Activity },
+  { to: "/chat", label: "Chat", icon: MessageCircle },
   { to: "/history", label: "History", icon: History },
   { to: "/inspector", label: "Inspector", icon: ScanSearch },
   { to: "/settings", label: "Settings", icon: Settings2 },
@@ -143,6 +145,55 @@ function Banner() {
   );
 }
 
+/** "Help is ready": shown when the model has written the help for an offer you accepted. */
+function HelpToast() {
+  const help = useLive((s) => [...s.log].reverse().find((e) => e.kind === "help" && (e as any).session) as any);
+  const path = usePath();
+  const [seen, setSeen] = useState<number>(() => Number(sessionStorage.getItem("saip-help-seen") || 0));
+  const fresh = help && help.id > seen && Date.now() / 1000 - help.at < 600 && !path.startsWith("/chat");
+  const dismiss = () => {
+    if (!help) return;
+    setSeen(help.id);
+    try {
+      sessionStorage.setItem("saip-help-seen", String(help.id));
+    } catch {
+      /* fine */
+    }
+  };
+  return (
+    <AnimatePresence>
+      {fresh && (
+        <motion.div
+          initial={{ opacity: 0, y: -16, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -10 }}
+          transition={{ type: "spring", stiffness: 320, damping: 28 }}
+          className="fixed top-4 left-1/2 z-50 w-[min(520px,calc(100vw-32px))] -translate-x-1/2 rounded-2xl border border-flow/40 bg-raised p-4 shadow-2xl shadow-black/30"
+        >
+          <div className="flex gap-3">
+            <Mark state="flow" size={22} className="mt-0.5 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[11.5px] font-medium uppercase tracking-[0.08em] text-flow">Help is ready</div>
+              <p className="mt-1 line-clamp-4 text-[14px] leading-relaxed text-ink">{help.text}</p>
+              <div className="mt-3 flex gap-2">
+                <Button size="sm" variant="primary" onClick={() => { dismiss(); navigate(`/chat?session=${help.session}`); }}>
+                  Continue in chat
+                </Button>
+                <Button size="sm" variant="ghost" onClick={dismiss}>
+                  Close
+                </Button>
+              </div>
+            </div>
+            <button onClick={dismiss} aria-label="Dismiss" className="-mt-1 -mr-1 h-7 w-7 shrink-0 rounded-lg text-faint hover:text-ink">
+              <X size={15} className="mx-auto" />
+            </button>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   const path = usePath();
   const link = useLive((s) => s.link);
@@ -218,6 +269,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </main>
       </div>
       <AskStack asks={asks} />
+      <HelpToast />
     </div>
   );
 }

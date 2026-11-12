@@ -57,7 +57,7 @@ export type LogEvent =
   | Episode
   | { id: number; kind: "offer"; at: number; message: string; task: string; generated: boolean; app?: string | null }
   | { id: number; kind: "outcome"; at: number; outcome: string; cooldown_mult: number }
-  | { id: number; kind: "help"; at: number; text: string }
+  | { id: number; kind: "help"; at: number; text: string; session?: number; task?: string }
   | { id: number; kind: "status"; at: number; level: string; text: string }
   | { id: number; kind: "quiet"; at: number; until: number }
   | { id: number; kind: "ask-closed"; at: number; ask: number; answer: string | null }
@@ -133,6 +133,7 @@ export type Settings = {
     new_repos: string;
     monitor_typed_content: boolean;
     typed_text_max_chars: number;
+    notify_offers: boolean;
   };
 };
 
