@@ -30,6 +30,16 @@ def test_safe_path_accepts_files_under_a_root(tmp_path):
     assert safe_path(str(tmp_path / "a.py"), [str(tmp_path)]) == (tmp_path / "a.py").resolve()
 
 
+def _symlink(link, target) -> bool:
+    """Make a symlink where the system allows it. Windows refuses without Developer Mode or admin rights; the
+    symlink case is then left out and the other cases are still checked."""
+    try:
+        link.symlink_to(target)
+        return True
+    except OSError:
+        return False
+
+
 def test_safe_path_refuses_what_it_should(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -39,10 +49,10 @@ def test_safe_path_refuses_what_it_should(tmp_path):
     (root / ".git").mkdir()
     (root / ".git" / "config.txt").write_text("x")
     (tmp_path / "secret.txt").write_text("s")
-    (root / "link.txt").symlink_to(tmp_path / "secret.txt")
+    linked = _symlink(root / "link.txt", tmp_path / "secret.txt")
     roots = [str(root)]
-    for bad in ("../secret.txt", str(tmp_path / "secret.txt"), "link.txt", ".git/config.txt", "pic.png", "sub",
-                "missing.md"):
+    for bad in ("../secret.txt", str(tmp_path / "secret.txt"), *(["link.txt"] if linked else []), ".git/config.txt",
+                "pic.png", "sub", "missing.md"):
         with pytest.raises(ToolError):
             safe_path(bad, roots)
     with pytest.raises(ToolError, match="nowhere I may read or write"):
@@ -56,9 +66,9 @@ def test_safe_path_for_write(tmp_path):
         safe_path("nope/new.md", [str(tmp_path)], for_write=True)
     with pytest.raises(ToolError):
         safe_path("docs", [str(tmp_path)], for_write=True)
-    (tmp_path / "l.md").symlink_to(tmp_path / "docs")
-    with pytest.raises(ToolError):
-        safe_path("l.md", [str(tmp_path)], for_write=True)
+    if _symlink(tmp_path / "l.md", tmp_path / "docs"):
+        with pytest.raises(ToolError):
+            safe_path("l.md", [str(tmp_path)], for_write=True)
 
 
 # ---------------------------------------------------------------------------------------------------- write / undo

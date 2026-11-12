@@ -329,7 +329,7 @@ def _run_terminal_only(a, plat, aw) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="saip", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--url", default=DEFAULT_URL, help="ActivityWatcher server (default http://localhost:5600)")
+    ap.add_argument("--url", default=DEFAULT_URL, help="ActivityWatcher server (default http://127.0.0.1:5600)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="start SAIP (dashboard, tray, agent); the first run is set up in the browser")
     r.add_argument("--setup", action="store_true", help="run the terminal setup again first")

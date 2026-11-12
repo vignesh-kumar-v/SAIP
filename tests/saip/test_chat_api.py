@@ -1,5 +1,6 @@
 """The chat over the API: tools and approvals in the transcript, and going back (rewind) with undo."""
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -161,7 +162,7 @@ def test_the_preview_of_the_rewind_lists_what_would_be_undone(rig):
     users = [i["id"] for i in view["items"] if i["kind"] == "user"]
     prev = rig.api.chat_rewind_preview(rig.cid, users[0])
     assert prev["item"] == users[0] and prev["drops"] == len(view["items"])
-    assert [(u["path"].rsplit("/", 1)[1], u["effect"]) for u in prev["undo"]] == [("old.md", "restore"), ("notes.md", "delete")]
+    assert [(Path(u["path"]).name, u["effect"]) for u in prev["undo"]] == [("old.md", "restore"), ("notes.md", "delete")]
     assert prev["cannot_undo"] == []
     later = rig.api.chat_rewind_preview(rig.cid, users[1])
     assert [u["effect"] for u in later["undo"]] == ["restore"] and later["drops"] == len(view["items"]) - users[1] + 1
