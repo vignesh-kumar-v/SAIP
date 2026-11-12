@@ -1,5 +1,6 @@
-# Copy to private.toml (gitignored) or let `saip setup` write it. Lookup order: $SAIP_CONFIG, ./private.toml,
-# then the per-user config folder. SAIP_LLM_BASE_URL / SAIP_LLM_MODEL / SAIP_LLM_API_KEY override the [llm] values.
+# Copy to private.toml (git-ignored), or let SAIP's setup page write it. SAIP looks for it in this order: the file named
+# by --config, $SAIP_CONFIG, ./private.toml, then the per-user settings folder. SAIP_LLM_BASE_URL, SAIP_LLM_MODEL and
+# SAIP_LLM_API_KEY override the [llm] values. Everything here can also be changed in the dashboard (Settings).
 
 [llm]
 base_url = "http://localhost:8000/v1"   # OpenAI-compatible, must return logprobs (vLLM, llama.cpp server, Ollama /v1)
@@ -10,8 +11,14 @@ api_key = ""
 # sample_temperature = 0.7
 # lookback_s = 300           # how much recent activity the model is shown
 # include_titles = false     # window titles stay on this machine unless you turn this on
-# private_apps = ["Messages", "Signal"]   # never named in what the model sees, and never typed-text monitored
-# read_screen = false        # at offer time, read the text near your cursor (macOS); works with a remote endpoint too
+# private_apps = ["Messages", "Signal"]   # the block list: never named to the model, never typed-text monitored, never read
+# read_screen = false        # read the text near your cursor when an offer is written (works with a remote endpoint too)
+# screen_chars = 1200        # how much of that text the model is shown
+# reasoning_effort = ""      # "none" stops a thinking model from reasoning first, so its first word is the answer
+# chat_tools = true          # the chat may read files, git changes and your screen, and propose clipboard copies and file writes
+# web_search = false         # let the chat search the web (your search words go to the search service)
+# search_provider = ""       # "" or "duckduckgo" (no key), "brave" or "tavily" (need search_api_key)
+# search_api_key = ""
 
 [gate]                        # the decision rule; see docs/State_Aware_Interruption_Formulas.md
 # c0 = 1.0                    # base false-alarm cost
@@ -22,14 +29,17 @@ api_key = ""
 # theta_flow = 0.5            # flow above this defers a near miss instead of dropping it
 
 [agent]
-watch_roots = []              # folders searched for git repositories, e.g. ["~/Developer"]; managed by `saip repo`
+watch_roots = []              # folders searched for git repositories, e.g. ["~/Developer"]; chat tools read and write only here
 # exclude = []                # folders or repos never to ask about
-# new_repos = "ask"           # a repo that appears later: "ask" (popup), "add" (silently), or "ignore"
+# new_repos = "ask"           # a repo that appears later: "ask" (prompt), "add" (silently), or "ignore"
 # rescan_s = 300              # how often the folders are searched for new repos
 # tick_s = 5
 # assess_interval_s = 30      # at most one LLM assessment per this long
 # cooldown_s = 300            # quiet period after an offer
+# offer_timeout_s = 45        # an offer left unanswered this long counts as ignored
 # pending_expiry_s = 600      # a deferred offer is dropped after this long
 # break_idle_s = 5            # no input for this long counts as a natural break
+# notify_offers = true        # a system notification with each offer
+# keep_chats = false          # save chats to chats.jsonl so they survive a restart (turning it off deletes the file)
 monitor_typed_content = false # typed-text monitor: records in every app except those on private_apps
 typed_text_max_chars = 200    # how much of the newest typed text the monitor hands out
