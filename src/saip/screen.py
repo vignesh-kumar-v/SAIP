@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from llm.privacy import is_blocked
+
 TERMINALS = ("terminal", "iterm", "ghostty", "kitty", "wezterm", "alacritty", "warp", "hyper", "tabby")
 SEP = "<<SAIP>>"
 MIN_CHARS = 20                       # less than this is a blank page, not context
@@ -57,7 +59,7 @@ def parse(output: str, private_apps: tuple, limit: int) -> Screen | None:
     if len(parts) != 3:
         return None
     app, cur, text = parts[0].strip(), parts[1].strip(), parts[2]
-    if not app or any(p.lower() == app.lower() for p in private_apps):
+    if not app or is_blocked(app, private_apps):
         return None
     try:
         cursor = int(float(cur))

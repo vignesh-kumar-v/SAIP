@@ -56,22 +56,22 @@ def test_only_the_newest_characters_are_handed_out():
     assert m.get_current_text() == "fghij"
 
 
-def test_nothing_is_recorded_outside_whitelisted_apps():
+def test_any_app_that_is_not_blocked_is_recorded():
     m = monitor(app="Finder")
-    type_(m, letters("secret"))
-    assert m.get_current_text() == ""
+    type_(m, letters("notes"))
+    assert m.get_current_text() == "notes"
 
 
-def test_blocked_apps_are_never_recorded_even_if_whitelisted():
+def test_blocked_apps_are_never_recorded():
     m = monitor(app="Google Chrome", blocked=("Chrome",))
     type_(m, letters("secret"))
     assert m.get_current_text() == ""
 
 
-def test_leaving_an_allowed_app_empties_the_buffer():
-    m = monitor()
+def test_entering_a_blocked_app_empties_the_buffer():
+    m = monitor(blocked=("1Password",))
     type_(m, letters("draft"))
-    m.state["app"] = "1Password"
+    m.state["app"] = "1Password 7"
     assert m.refresh_allowed() is False
     assert m.get_current_text() == ""
     m.state["app"] = "Code"
@@ -79,10 +79,10 @@ def test_leaving_an_allowed_app_empties_the_buffer():
     assert m.get_current_text() == ""
 
 
-def test_whitelist_matches_whole_words_only():
-    from saip.typing_monitor import _is_text_app
-    assert _is_text_app("Microsoft Word") and _is_text_app("main.py - Visual Studio Code") and _is_text_app("Code")
-    assert not _is_text_app("1Password") and not _is_text_app("Xcode") and not _is_text_app("Finder")
+def test_key_presses_are_counted_even_where_nothing_is_kept():
+    m = monitor(app="Signal", blocked=("Signal",))
+    type_(m, letters("abc"))
+    assert m.get_current_text() == "" and m.presses == 3
 
 
 def test_unknown_foreground_app_means_not_recording():

@@ -89,3 +89,12 @@ class Platform:
     # ---- notifications ----
     def notify(self, title: str, message: str) -> bool:
         return False
+
+    # ---- apps ----
+    def installed_apps(self) -> list[dict]:
+        """Installed applications as {"label", "value"} rows (see platform/apps.py). Empty when unknown."""
+        return []
+
+    def front_app(self) -> str | None:
+        """The name of the app in front, or None when it cannot be told."""
+        return None

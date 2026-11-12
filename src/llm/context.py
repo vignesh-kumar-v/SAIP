@@ -15,6 +15,8 @@ from collections import Counter
 from classifier.categories import category, window_key
 from classifier.loader import Trace
 
+from .privacy import is_blocked
+
 MIN_DWELL_S = 2.0
 MAX_TIMELINE = 15
 FAIL_FREE_EXIT = (0, 130, None)      # success, Ctrl-C, unknown: not failures
@@ -29,7 +31,7 @@ def _visits(window: list, t0: float, t1: float, private: tuple, titles: bool) ->
             continue
         d = e["data"]
         app = d.get("app") or "unknown"
-        hidden = any(p.lower() == app.lower() for p in private)
+        hidden = is_blocked(app, private)
         key = window_key(d)
         cat = "private" if hidden else category(d)
         label = PRIVATE if hidden else app
