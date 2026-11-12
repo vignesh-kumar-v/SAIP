@@ -50,7 +50,7 @@ def give_help_with_tools(client: ChatClient, task: str, context: str, screen, to
     messages = help_messages(task, context, screen)
     messages[0] = {"role": "system", "content": SYSTEM + TOOLS}
     out = chat_turn(client, messages, tools, run_tool, max_rounds=3, max_tokens=max_tokens)
-    looked = [{"name": e["name"], "label": e["label"], "ok": e["ok"]} for e in out["events"]]
+    looked = [{"name": e["name"], "label": e["label"], "ok": e["ok"], "flag": e.get("flag")} for e in out["events"]]
     text = out["text"]
     if not text:                                       # it only looked, or tried to propose an action: answer plainly
         return give_help(client, task, context, screen), looked

@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass
 
 from llm.privacy import is_blocked
+from llm.sanitize import clean
 
 TERMINALS = ("terminal", "iterm", "ghostty", "kitty", "wezterm", "alacritty", "warp", "hyper", "tabby")
 SEP = "<<SAIP>>"
@@ -111,7 +112,7 @@ def parse(output: str, private_apps: tuple, limit: int) -> Screen | None:
         cursor = int(float(cur))
     except ValueError:
         cursor = 0
-    body = redact(window_text(text, cursor, limit, tail=app.lower().startswith(TERMINALS)))
+    body = redact(window_text(clean(text), cursor, limit, tail=app.lower().startswith(TERMINALS)))
     return Screen(app, body) if len(body) >= MIN_CHARS else None
 
 
@@ -119,7 +120,7 @@ def typed_for_model(text: str | None) -> str | None:
     """Typed text as the model sees it: obvious secrets masked, nothing else filtered. None when there is none."""
     if not text or not text.strip():
         return None
-    return redact(text).strip() or None
+    return redact(clean(text)).strip() or None
 
 
 def copy_to_clipboard(text: str) -> bool:

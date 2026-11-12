@@ -248,14 +248,16 @@ class Api:
         """Store what a model turn produced: its tool uses, a proposed action, its words."""
         items = list(lead)
         for e in out["events"]:
-            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"]}})
+            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"],
+                                                                        "flag": e.get("flag")}})
         p = out["pending"]
         if p:
             from .chat_tools import UNTRUSTED_TOOLS
             pv = p["preview"]
             seen = self.runtime.chats.get(cid)
             read = [i["tool"] for i in (seen["items"] if seen else []) if i["kind"] == "tool"] + out["events"]
-            after = list(dict.fromkeys(t["label"] for t in read if t.get("ok") and t.get("name") in UNTRUSTED_TOOLS))
+            after = list(dict.fromkeys(t["label"] + (" (has text aimed at the model)" if t.get("flag") else "")
+                                       for t in read if t.get("ok") and t.get("name") in UNTRUSTED_TOOLS))
             items.append({"kind": "action", "text": pv.get("title") or p["name"], "_call": p["call_id"], "_args": p["arguments"],
                           "action": {"name": p["name"], "title": pv.get("title") or p["name"], "path": pv.get("path"),
                                      "content": pv.get("content"), "diff": pv.get("diff"), "exists": bool(pv.get("exists")),
@@ -304,7 +306,8 @@ class Api:
             if c.get("first"):
                 wire.append({"role": "assistant", "content": c["first"]})
         start = len(wire)
-        wire.append({"role": "user", "content": text})
+        from llm.sanitize import clean
+        wire.append({"role": "user", "content": clean(text)})     # what was pasted may hide characters; the page keeps it
         try:
             out = self._turn(cid, wire, toolbox)
         except LLMError as e:

@@ -209,7 +209,7 @@ export type ChatItem = {
   kind: "user" | "assistant" | "tool" | "action";
   at: number;
   text: string;
-  tool?: { name: string; label: string; ok: boolean };
+  tool?: { name: string; label: string; ok: boolean; flag?: string[] | null };
   action?: ChatAction;
   risky?: RiskyCommand[];
   claim?: string | null;

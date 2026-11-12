@@ -30,6 +30,8 @@ from pathlib import Path
 from . import repos as repos_mod
 from . import websearch
 from .screen import TOKEN_SECRETS, copy_to_clipboard
+from llm.checks import injection_signs
+from llm.sanitize import strip_hidden
 
 TEXT_EXTENSIONS = frozenset({".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".toml", ".yaml", ".yml",
                              ".html", ".css", ".csv", ".tex", ".sh", ".c", ".cpp", ".h", ".java", ".go", ".rs"})
@@ -268,7 +270,14 @@ class Toolbox:
                 self._check(name, args)
                 return {"kind": "approve", "preview": self.preview(name, args)}
             result, label = getattr(self, "_" + name)(args)
-            return {"kind": "read", "result": _cap(mask_output(result)), "label": label}
+            text, hidden = strip_hidden(result)
+            flag = injection_signs(text)
+            if hidden and hidden["message"]:
+                flag.insert(0, f"hides a message in invisible characters: \u201c{hidden['message'][:120]}\u201d")
+            out = {"kind": "read", "result": _cap(mask_output(text)), "label": label}
+            if flag:
+                out["flag"] = flag
+            return out
         except (ToolError, websearch.SearchError) as e:
             return {"kind": "error", "result": str(e), "label": f"Could not use {name}: {e}"[:120]}
         except Exception as e:                                  # a tool must never take the chat down

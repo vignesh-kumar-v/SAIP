@@ -117,7 +117,8 @@ class Chats:
                                 "screen": screen, "live": live, "first": first or None, "items": [], "wire": [],
                                 "next_item": 1}
             for e in looked or []:
-                self._append(self._chats[cid], "tool", e["label"], tool={"name": e["name"], "label": e["label"], "ok": e["ok"]})
+                self._append(self._chats[cid], "tool", e["label"], tool={"name": e["name"], "label": e["label"], "ok": e["ok"],
+                                                                           "flag": e.get("flag")})
             if first:
                 self._append(self._chats[cid], "assistant", first)
             for old in sorted(self._chats)[:-MAX_CHATS]:
@@ -236,7 +237,7 @@ class Chats:
                 row["risky"] = risky_commands(i["text"])
                 row["claim"] = unbacked_claim(i["text"], approved, pending)
             if i["kind"] == "tool":
-                row["tool"] = {k: i["tool"].get(k) for k in ("name", "label", "ok")}
+                row["tool"] = {k: i["tool"].get(k) for k in ("name", "label", "ok", "flag")}
             elif i["kind"] == "action":
                 row["action"] = {**{k: i["action"].get(k) for k in ACTION_FIELDS},
                                  "undoable": i["action"]["state"] == "approved" and bool(i.get("_undo"))}
