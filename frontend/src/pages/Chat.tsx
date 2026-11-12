@@ -114,12 +114,12 @@ export function Chat() {
     box.current?.focus();
   };
 
-  const decide = async (item: ChatItem, approve: boolean) => {
+  const decide = async (item: ChatItem, approve: boolean, confirmed: boolean) => {
     if (!current || working) return;
     setActing(item.id);
     setError(null);
     try {
-      setCurrent(await post<Chat>(`/api/chats/${current.id}/actions/${item.id}`, { approve }));
+      setCurrent(await post<Chat>(`/api/chats/${current.id}/actions/${item.id}`, { approve, confirmed }));
       list.reload();
     } catch (e: any) {
       setError(e.message);
@@ -335,11 +335,11 @@ export function Chat() {
                         onRewind={() => startRewind(it)}
                       />
                     ) : it.kind === "assistant" ? (
-                      <AssistantBubble text={it.text} onQuote={startQuote} disabled={working || pending} />
+                      <AssistantBubble text={it.text} onQuote={startQuote} disabled={working || pending} risky={it.risky} claim={it.claim} />
                     ) : it.kind === "tool" ? (
                       <ToolLine item={it} />
                     ) : (
-                      <ActionCard item={it} busy={acting === it.id} locked={working} onDecide={(ok) => decide(it, ok)} />
+                      <ActionCard item={it} busy={acting === it.id} locked={working} onDecide={(ok, sure) => decide(it, ok, sure)} />
                     )}
                   </motion.div>
                 ))}
