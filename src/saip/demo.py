@@ -72,7 +72,7 @@ class DemoApi(Api):
 
     # ---- reading ----
     def app(self) -> dict:
-        return {"app": "saip", "version": "demo", "platform": "macOS", "demo": True, "port": self.port,
+        return {"app": "saip", "version": "demo", "platform": "macOS", "demo": True, "port": self.port, "pages": self.bus.pages,
                 "ready": self.ready, "setup_done": self.ready, "model": self.cfg["llm"]["model"] or None,
                 "config": self.cfg["path"], "runtime": self.runtime.status(), "autostart": self.auto,
                 "monitor_typed_content": self.cfg["agent"]["monitor_typed_content"], "quiet_until": self.bus.quiet_until}

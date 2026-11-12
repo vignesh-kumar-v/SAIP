@@ -149,7 +149,7 @@ class Client:
 
     def follow_once(self) -> None:
         """Read the stream until it ends. Raises OSError / URLError when the agent cannot be reached."""
-        with _OPEN.open(self.base + "/api/events", timeout=40) as stream:      # the server sends a keep-alive every 15 s
+        with _OPEN.open(self.base + "/api/events?client=tray", timeout=40) as stream:      # the server sends a keep-alive every 15 s
             self.connected_once = True
             kind = None
             for raw in stream:
@@ -326,6 +326,10 @@ def _dialog_asker(client: Client):
 
     def show(ask: dict) -> None:
         def work():
+            time.sleep(1.0)                      # a dashboard page, if open, shows the card; one answer is enough
+            page = client._get("/api/app")
+            if page and page.get("pages", 0) > 0:
+                return
             left = int(max(1.0, ask["at"] + ask["timeout_s"] - time.time()))
             got = plat.ask(ask.get("title", "SAIP"), ask["message"], tuple(ask["buttons"]), timeout=left, default=False)
             if got:

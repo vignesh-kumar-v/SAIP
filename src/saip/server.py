@@ -172,7 +172,7 @@ class Api:
         from llm.config import load_settings
         settings = load_settings(getattr(getattr(self.runtime, "opts", None), "config", None))
         return {"app": "saip", "version": VERSION, "platform": self.plat.name, "demo": bool(self.bus.meta.get("demo")),
-                "port": self.port, "ready": setup.is_ready(settings), "setup_done": bool(setup.load_manifest().get("done")),
+                "port": self.port, "pages": self.bus.pages, "ready": setup.is_ready(settings), "setup_done": bool(setup.load_manifest().get("done")),
                 "model": settings.llm.model or None, "config": str(settings.path) if settings.path else None,
                 "runtime": self.runtime.status() if self.runtime else None, "autostart": autostart.is_enabled(),
                 "monitor_typed_content": settings.agent.monitor_typed_content, "quiet_until": self.bus.quiet_until}
@@ -431,7 +431,7 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 "/api/export": lambda: api.export(q.get("what", "decisions"), q.get("format", "csv")),
             }
             if path == "/api/events":
-                self._stream()
+                self._stream(q.get("client") == "tray")
             elif path in routes:
                 self._reply(routes[path])
             elif path.startswith("/api/"):
@@ -524,13 +524,13 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 self._json({"error": "not found"}, 404)
 
         # ---- the stream ----
-        def _stream(self) -> None:
+        def _stream(self, tray: bool = False) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
             self.end_headers()
-            q = bus.subscribe()
+            q = bus.subscribe(tray)
             try:
                 self._event("snapshot", bus.snapshot(), retry_ms=1000)
                 while True:

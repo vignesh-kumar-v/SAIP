@@ -238,3 +238,12 @@ def test_a_refused_post_still_gets_its_answer_when_the_body_is_large():
         assert _post(_base(httpd), "/api/asks/1", big, {"Host": "evil.example"})[0] == 403
     finally:
         httpd.shutdown()
+
+
+def test_the_tray_is_not_counted_as_a_dashboard_page():
+    bus = Bus()
+    page, tray = bus.subscribe(), bus.subscribe(tray=True)
+    assert bus.listeners == 2 and bus.pages == 1
+    bus.unsubscribe(page)
+    assert bus.pages == 0
+    bus.unsubscribe(tray)
