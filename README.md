@@ -139,6 +139,8 @@ The **Chat** page is a normal conversation, and it knows what you were doing in 
 
 - reply to one earlier message, or just part of it (select text and press **Reply to this part**);
 - **edit** one of your messages and send it again, or **rewind** to it, which removes everything after it;
+- **delete** chats you no longer want: hover over one in the list and press the bin, or press **Select**, tick several
+  and press **Delete**. Files a chat wrote stay as they are;
 - ask it to use tools (below). Replies are shown with Markdown: code in boxes with a Copy button, lists, bold.
 
 **Chat tools** (Settings → Chat tools):

@@ -67,6 +67,15 @@ class Chats:
             self._save()
             return n
 
+    def delete(self, ids) -> int:
+        """Forget the conversations with these ids (and save). Ids that are already gone are ignored.
+        Files a chat wrote stay as they are: deleting a chat is not a rewind."""
+        with self._lock:
+            gone = [cid for cid in set(ids) if self._chats.pop(cid, None) is not None]
+            if gone:
+                self._save()
+            return len(gone)
+
     def _load(self) -> None:
         try:
             lines = self._path.read_text(encoding="utf-8").splitlines()
@@ -137,8 +146,9 @@ class Chats:
 
     def set_context(self, cid: int, context: str) -> None:
         with self._lock:
-            self._chats[cid]["context"] = context
-            self._save()
+            if cid in self._chats:
+                self._chats[cid]["context"] = context
+                self._save()
 
     def add_item(self, cid: int, kind: str, text: str, **fields) -> int:
         with self._lock:
@@ -150,7 +160,9 @@ class Chats:
         """Add a finished turn and the wire that goes with it. `items` are {"kind", "text", ...fields};
         a "user" item remembers `start`, the length of the wire before the turn."""
         with self._lock:
-            c = self._chats[cid]
+            c = self._chats.get(cid)
+            if c is None:                                         # deleted while the model was answering
+                return
             for it in items:
                 fields = {k: v for k, v in it.items() if k not in ("kind", "text")}
                 if it["kind"] == "user":
@@ -161,8 +173,9 @@ class Chats:
 
     def set_wire(self, cid: int, wire: list[dict]) -> None:
         with self._lock:
-            self._chats[cid]["wire"] = list(wire)
-            self._save()
+            if cid in self._chats:
+                self._chats[cid]["wire"] = list(wire)
+                self._save()
 
     def claim_action(self, cid: int, item_id: int) -> bool:
         """True for the one caller that may now decide this pending action."""
@@ -175,7 +188,8 @@ class Chats:
 
     def set_action(self, cid: int, item_id: int, state: str, detail: str | None = None, undo: dict | None = None) -> None:
         with self._lock:
-            item = self._find(self._chats[cid], item_id)
+            c = self._chats.get(cid)
+            item = self._find(c, item_id) if c is not None else None
             if item is not None:
                 item["action"].update(state=state, detail=detail)
                 item["_undo"] = undo
@@ -254,7 +268,9 @@ class Chats:
             ok, message = undo(rec)
             (done if ok else skipped).append(message)
         with self._lock:
-            c = self._chats[cid]
+            c = self._chats.get(cid)
+            if c is None:                                         # deleted while the files were being put back
+                return {"undone": done, "skipped": skipped}
             idx, _ = self._tail(c, item_id)
             c["wire"] = c["wire"][:c["items"][idx]["_w"]]
             del c["items"][idx:]

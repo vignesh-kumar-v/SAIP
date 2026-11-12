@@ -339,3 +339,49 @@ export function ConfirmRewind({
     </Dialog.Root>
   );
 }
+
+export function ConfirmDelete({
+  titles,
+  busy,
+  onConfirm,
+  onCancel,
+}: {
+  titles: string[] | null;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const n = titles?.length ?? 0;
+  return (
+    <Dialog.Root open={titles !== null} onOpenChange={(o) => !o && !busy && onCancel()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50 backdrop-blur-[2px]" />
+        <Dialog.Content className="fixed top-1/2 left-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line bg-raised p-5 shadow-2xl focus:outline-none">
+          <Dialog.Title className="text-[16px] font-semibold tracking-tight text-ink">
+            {n === 1 ? "Delete this chat?" : `Delete ${n} chats?`}
+          </Dialog.Title>
+          <Dialog.Description asChild>
+            <div className="mt-2.5 space-y-3 text-[13.5px] leading-relaxed text-muted">
+              {titles && (
+                <ul className="scroll-thin max-h-40 space-y-1 overflow-auto">
+                  {titles.map((t, i) => (
+                    <li key={i} className="truncate text-[12.5px] text-ink">{t}</li>
+                  ))}
+                </ul>
+              )}
+              <p>This cannot be undone. Files a chat wrote stay as they are.</p>
+            </div>
+          </Dialog.Description>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button variant="danger" size="sm" busy={busy} onClick={onConfirm}>
+              Delete
+            </Button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
