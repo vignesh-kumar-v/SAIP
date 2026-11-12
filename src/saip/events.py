@@ -26,6 +26,7 @@ class Bus:
         self._lock = threading.Lock()
         self._seq = itertools.count(1)
         self._subs: set[queue.Queue] = set()
+        self._tray: set[queue.Queue] = set()      # subscribers that are the tray, not a dashboard page
         self._ticks: deque = deque(maxlen=TICKS_KEPT)
         self._log: deque = deque(maxlen=LOG_KEPT)
         self._asks: dict[int, dict] = {}          # open questions: id -> {"event", "answer", "done"}
@@ -46,15 +47,24 @@ class Bus:
         return ev
 
     # ---- listening ----
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, tray: bool = False) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=1000)
         with self._lock:
             self._subs.add(q)
+            if tray:
+                self._tray.add(q)
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
             self._subs.discard(q)
+            self._tray.discard(q)
+
+    @property
+    def pages(self) -> int:
+        """Dashboard pages open right now (the tray does not count)."""
+        with self._lock:
+            return len(self._subs - self._tray)
 
     @property
     def listeners(self) -> int:

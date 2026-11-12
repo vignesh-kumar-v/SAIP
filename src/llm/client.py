@@ -18,15 +18,23 @@ class LLMError(RuntimeError):
     pass
 
 
+class ToolsUnsupported(LLMError):
+    """The endpoint refused a request that carried tools (HTTP 400): it cannot call functions."""
+
+
 @dataclass
 class Choice:
     text: str
     first_token_logprobs: dict | None = None     # {token: logprob} for the top candidates of the first token
+    finish_reason: str | None = None             # "stop", or "length" when the reply was cut at max_tokens
 
 
 class ChatClient(Protocol):
     def complete(self, messages: list, *, max_tokens: int = 1, temperature: float = 0.0, logprobs: bool = False,
                  top_logprobs: int = 10, n: int = 1) -> list[Choice]: ...
+
+    def chat(self, messages: list, *, tools: list | None = None, max_tokens: int = 420,
+             temperature: float = 0.4) -> dict: ...
 
 
 class OpenAIChatClient:
@@ -55,6 +63,42 @@ class OpenAIChatClient:
             raise LLMError(f"cannot reach {self.url}: {e}") from e
         return parse_choices(data, want_logprobs=logprobs)
 
+    def chat(self, messages, *, tools=None, max_tokens=420, temperature=0.4):
+        """One chat turn that may ask for tools: {"content", "tool_calls": [{"id", "name", "arguments"}], "finish_reason"}."""
+        body = {"model": self.cfg.model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
+        if tools:
+            body.update(tools=tools, tool_choice="auto")
+        if self.cfg.reasoning_effort:
+            body["reasoning_effort"] = self.cfg.reasoning_effort
+        headers = {"Content-Type": "application/json"}
+        if self.cfg.api_key:
+            headers["Authorization"] = "Bearer " + self.cfg.api_key
+        req = urllib.request.Request(self.url, json.dumps(body).encode(), headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.cfg.timeout_s) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            detail = f"endpoint returned HTTP {e.code}: {e.read()[:200]!r}"
+            raise (ToolsUnsupported if tools and e.code == 400 else LLMError)(detail) from e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            raise LLMError(f"cannot reach {self.url}: {e}") from e
+        try:
+            choice = data["choices"][0]
+            message = choice.get("message") or {}
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
+            raise LLMError(f"unexpected reply shape: {str(data)[:200]}") from e
+        calls = []
+        for i, c in enumerate(message.get("tool_calls") or []):
+            fn = c.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                args = {}
+            calls.append({"id": c.get("id") or f"call_{i}", "name": fn.get("name") or "",
+                          "arguments": args if isinstance(args, dict) else {}})
+        return {"content": message.get("content") or "", "tool_calls": calls,
+                "finish_reason": choice.get("finish_reason")}
+
 
 def parse_choices(data: dict, want_logprobs: bool) -> list[Choice]:
     try:
@@ -73,5 +117,5 @@ def parse_choices(data: dict, want_logprobs: bool) -> list[Choice]:
         if want_logprobs and not top:
             raise LLMError("the endpoint returned no log-probabilities; the confidence step needs a server "
                            "that supports logprobs (vLLM, llama.cpp server, Ollama /v1)")
-        out.append(Choice(text=text, first_token_logprobs=top))
+        out.append(Choice(text=text, first_token_logprobs=top, finish_reason=c.get("finish_reason")))
     return out

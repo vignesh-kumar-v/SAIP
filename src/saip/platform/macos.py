@@ -112,6 +112,14 @@ class MacOS(Platform):
         self.screen_error = ""
         return out
 
+    def installed_apps(self):
+        from .apps import installed_macos
+        return installed_macos()
+
+    def front_app(self):
+        from .apps import front_macos
+        return front_macos()
+
     def notify(self, title: str, message: str) -> bool:
         esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
         return run(["osascript", "-e", f'display notification "{esc(message)}" with title "{esc(title)}"'])[0] == 0

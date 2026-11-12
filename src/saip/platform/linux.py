@@ -39,5 +39,13 @@ class Linux(Platform):
             return buttons[0]
         return {0: buttons[-1], 1: buttons[1] if len(buttons) > 2 else buttons[0]}.get(code)
 
+    def installed_apps(self):
+        from .apps import installed_linux
+        return installed_linux()
+
+    def front_app(self):
+        from .apps import front_linux
+        return front_linux()
+
     def notify(self, title: str, message: str) -> bool:
         return shutil.which("notify-send") is not None and run(["notify-send", title, message], timeout=10)[0] == 0

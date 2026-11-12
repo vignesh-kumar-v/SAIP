@@ -75,6 +75,14 @@ class Windows(Platform):
         code, out = run(["powershell", "-NoProfile", "-Command", script], timeout=timeout + 20)
         return mapping.get(out.strip()) if code == 0 else None
 
+    def installed_apps(self):
+        from .apps import installed_windows
+        return installed_windows()
+
+    def front_app(self):
+        from .apps import front_windows
+        return front_windows()
+
     def notify(self, title: str, message: str) -> bool:
         esc = lambda s: s.replace("'", "''")
         return run(["powershell", "-NoProfile", "-Command", TOAST % (esc(title), esc(message))], timeout=20)[0] == 0

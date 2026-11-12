@@ -69,6 +69,19 @@ def append_log(row: dict, path: Path | None = None) -> None:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def decisions_path() -> Path:
+    """Every gate decision, not only the ones that became offers: numbers and the app in front, no text."""
+    return user_config_dir() / "decisions.jsonl"
+
+
+def append_decision(row: dict, path: Path | None = None) -> None:
+    append_log(row, path or decisions_path())
+
+
+def read_decisions(path: Path | None = None) -> list[dict]:
+    return read_log(path or decisions_path())
+
+
 def read_log(path: Path | None = None) -> list[dict]:
     path = path or log_path()
     if not path.is_file():

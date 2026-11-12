@@ -1,43 +1,39 @@
 """The `saip` command.
 
-  saip run        set everything up on the first run, then watch and decide (Ctrl-C to stop)
-  saip setup      just the setup (safe to repeat)
+  saip run        start SAIP: the agent, its dashboard (opened in your browser) and the tray icon.
+                  The first run walks you through setup in the browser.
+  saip start      the same, in the background: no terminal has to stay open
+  saip stop       stop a SAIP started either way
+  saip status     is it running, and what is it doing
+  saip setup      the setup in the terminal (safe to repeat)
   saip doctor     check every moving part and say what is wrong
   saip repo       add / list / remove the folders whose git repositories get the commit hook
   saip offers     what happened to past offers (accepted, dismissed, ignored)
-  saip tray       tray icon and offer popup for an agent running with --ui
+  saip tray       only the tray icon, for a SAIP already running
   saip uninstall  put the machine back exactly as it was before SAIP
 """
 from __future__ import annotations
 
 import argparse
+import signal
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
 from pathlib import Path
 
-from llm.assess import assess
-from llm.calibration import load_temperatures
-from llm.client import LLMError, OpenAIChatClient
-from llm.config import load_settings, user_config_dir
-from llm.context import build_context
-from llm.helper import give_help
-from llm.proposal import FALLBACK, propose
-from llm.replay import MockClient
+from llm.config import load_settings
 
 from . import offers as offers_mod
-from . import prompts as repos_mod_prompts
 from . import repos as repos_mod
 from . import server as server_mod
 from . import setup as setup_mod
-from .agent import NotReady, Orchestrator, describe, fetch_trace, score_now
-from .aw import DEFAULT_URL, ActivityWatch, AWError
+from .aw import DEFAULT_URL, ActivityWatch
 from .events import Bus, UiPlatform
-from .tray import main as tray_main
 from .hooks import githook
 from .platform import current
-from .screen import copy_to_clipboard, read_screen, typed_for_model
-from .watchers import GitWatcher
+from .runtime import RunOptions, Runtime
 
 
 def cmd_setup(a) -> int:
@@ -141,197 +137,230 @@ def cmd_uninstall(a) -> int:
     return 1 if any(r.status == "failed" for r in results) else 0
 
 
+def _run_options(a) -> RunOptions:
+    return RunOptions(config=a.config, mock_llm=a.mock_llm, trigger=a.trigger, no_dialog=a.no_dialog,
+                      notify=a.notify, read_screen=a.read_screen)
+
+
 def cmd_run(a) -> int:
+    """saip run: the agent, the dashboard and the tray. The first run is set up in the browser."""
     plat, aw = current(), ActivityWatch(a.url)
+    if a.no_ui:
+        return _run_terminal_only(a, plat, aw)
+    port = a.ui_port
+    other = server_mod.running_here(port)
+    if other:
+        page = f"http://localhost:{port}/"
+        print(f"SAIP is already running: {page}")
+        if not a.no_browser:
+            webbrowser.open(page)
+        return 0
+    if a.setup:
+        cmd_setup(argparse.Namespace(url=a.url, yes=a.yes, root=a.root))
+        print()
+
+    bus = Bus()
+    runtime = Runtime(bus, plat, aw, _run_options(a), ui=UiPlatform(plat, bus))
+    runtime.sync_chats(load_settings(a.config))
+    stop = threading.Event()
+    ready = threading.Event()
+    api = server_mod.Api(bus, plat=plat, aw=aw, runtime=runtime, on_ready=ready.set, on_shutdown=stop.set)
+    try:
+        httpd = server_mod.start(bus, port, api=api)
+    except OSError as e:
+        print(f"port {port} is taken ({e}); using a free one instead")
+        httpd = server_mod.start(bus, 0, api=api)
+    page = server_mod.url(httpd)
+    print(f"Dashboard at {page}")
+
+    tray = None
+    if not a.no_tray:                    # its own process: it talks to the API like any other UI
+        tray = subprocess.Popen([sys.executable, "-m", "saip.tray", "--follow", "--port", str(httpd.server_address[1])])
+
+    first = not (a.no_setup or a.mock_llm) and not setup_mod.is_ready(load_settings(a.config))
+    if not a.no_browser:
+        def open_page():
+            # A dashboard tab left open from an earlier run reconnects by itself within about a second.
+            if not _wait(lambda: bus.listeners > (1 if tray else 0), 2.5):
+                webbrowser.open(page + ("welcome" if first else ""))
+        threading.Thread(target=open_page, daemon=True).start()
+
+    def on_signal(*_):
+        stop.set()
+    signal.signal(signal.SIGINT, on_signal)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, on_signal)
+    try:
+        if first:
+            print(f"First run: finish setting up in the browser at {page}welcome\n(Ctrl-C to stop)")
+            while not (ready.is_set() or stop.is_set()):
+                stop.wait(0.5)
+        if not stop.is_set():
+            runtime.start()
+            print("Ctrl-C to stop.\n")
+            while not stop.is_set():
+                stop.wait(0.5)
+    finally:
+        print("\nStopping…")
+        runtime.stop()
+        bus.publish("status", level="waiting", text="SAIP has stopped")
+        if tray is not None and tray.poll() is None:
+            tray.terminate()
+            try:
+                tray.wait(3)
+            except subprocess.TimeoutExpired:
+                tray.kill()
+        httpd.shutdown()
+        print("Stopped.")
+    return 0
+
+
+def log_file() -> Path:
+    from llm.config import user_config_dir
+    return user_config_dir() / "saip.log"
+
+
+def cmd_start(a) -> int:
+    """saip start: run SAIP detached from this terminal, with its output in a log file."""
+    port = a.ui_port
+    if server_mod.running_here(port):
+        print(f"SAIP is already running: http://localhost:{port}/")
+        return 0
+    from llm.config import find_config
+    cmd = [sys.executable, "-m", "saip", "--url", a.url, "run", "--ui-port", str(port)]
+    config = find_config(a.config)
+    if config:                                   # by path: the background process may not start in this folder
+        cmd += ["--config", str(Path(config).resolve())]
+    for flag in ("no_browser", "no_tray", "mock_llm"):
+        if getattr(a, flag):
+            cmd.append("--" + flag.replace("_", "-"))
+    log = log_file()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    out = open(log, "a", encoding="utf-8")
+    out.write(f"\n--- saip start, {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+    out.flush()
+    detach = ({"creationflags": 0x00000008 | 0x00000200} if sys.platform.startswith("win")      # detached, own group
+              else {"start_new_session": True})
+    env = {**__import__("os").environ, "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, **detach)
+    if not _wait(lambda: server_mod.running_here(port) is not None or proc.poll() is not None, 15):
+        print(f"SAIP did not answer on port {port} within 15 seconds. See {log}")
+        return 1
+    if proc.poll() is not None and not server_mod.running_here(port):
+        print(f"SAIP stopped right away (exit code {proc.returncode}). See {log}")
+        return 1
+    print(f"SAIP is running in the background: http://localhost:{port}/\n"
+          f"Stop it with `saip stop` or from the tray menu. Its output is in {log}")
+    return 0
+
+
+def cmd_stop(a) -> int:
+    """saip stop: ask a running SAIP to shut down (agent, dashboard and tray)."""
+    import json
+    import urllib.request
+    port = a.ui_port
+    if not server_mod.running_here(port):
+        print("SAIP is not running.")
+        return 0
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/shutdown", b"{}", {"Content-Type": "application/json"})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5) as r:
+            json.loads(r.read())
+    except Exception as e:
+        print(f"SAIP did not accept the stop request ({e}).")
+        return 1
+    if _wait(lambda: server_mod.running_here(port, timeout=0.5) is None, 15):
+        print("SAIP has stopped.")
+        return 0
+    print("SAIP is still shutting down; check again with `saip status`.")
+    return 1
+
+
+def cmd_status(a) -> int:
+    """saip status: exit code 0 when running, 3 when not."""
+    info = server_mod.running_here(a.ui_port)
+    if not info:
+        print("SAIP is not running. Start it with `saip start` (background) or `saip run`.")
+        return 3
+    rt = info.get("runtime") or {}
+    if not info.get("ready"):
+        state = "waiting for setup to be finished in the browser"
+    elif rt.get("error"):
+        state = f"the agent stopped: {rt['error']}"
+    elif rt.get("running"):
+        state = {"llm": f"watching, model {rt.get('model')}", "mock": "watching, mock model",
+                 "score-only": "scoring only (no model configured)"}.get(rt.get("mode"), "watching")
+    else:
+        state = "dashboard up, agent not running"
+    print(f"SAIP is running: http://localhost:{a.ui_port}/\n  {state}")
+    if info.get("quiet_until", 0) > time.time():
+        print(time.strftime("  offers paused until %H:%M", time.localtime(info["quiet_until"])))
+    return 0
+
+
+def _wait(check, seconds: float) -> bool:
+    end = time.time() + seconds
+    while time.time() < end:
+        if check():
+            return True
+        time.sleep(0.1)
+    return check()
+
+
+def _run_terminal_only(a, plat, aw) -> int:
+    """saip run --no-ui: as before the dashboard existed. Setup asks its questions in the terminal."""
     if (a.setup or not setup_mod.is_set_up()) and not a.no_setup:
         print("First run: setting everything up.\n")
         cmd_setup(argparse.Namespace(url=a.url, yes=a.yes, root=a.root))
         print()
-    settings = load_settings(a.config)
-    cfg = settings.agent
-    client, mode = None, "score only (no LLM endpoint configured: scores are printed, nothing is decided)"
-    if a.mock_llm:
-        client, mode = MockClient(), "MOCK LLM (pipeline check only)"
-    elif settings.llm.base_url and settings.llm.model:
-        client, mode = OpenAIChatClient(settings.llm), f"LLM {settings.llm.model} at {settings.llm.base_url}"
-    temps = load_temperatures(user_config_dir() / "calibration.json")
-    git = GitWatcher(aw, [])             # polls only accepted repositories where a hook cannot be installed
-    last_scan = 0.0
-    bus, ui = Bus(), plat                # `ui` shows dialogs in the dashboard when one is open, else as before
-    tray = None
-    if a.ui or a.tray:
-        try:
-            httpd = server_mod.start(bus, a.ui_port)
-            ui = UiPlatform(plat, bus)
-            print(f"Dashboard at {server_mod.url(httpd)}")
-            if a.tray:                   # its own process: it talks to the API like any other UI
-                tray = subprocess.Popen([sys.executable, "-m", "saip.tray", "--follow", "--port", str(httpd.server_address[1])])
-        except OSError as e:
-            print(f"could not start the dashboard on port {a.ui_port} ({e}); carrying on without it")
-
-    def accepted_now(state, hooked):
-        if not hooked:
-            git.repos = list(dict.fromkeys(git.repos + [state.path]))
-        setup_mod.update_manifest(hooked_repos=[str(state.path)] if hooked else [])
-    prompter = repos_mod_prompts.RepoPrompter(ui, sys.executable, cfg.new_repos, accepted_now)
-    prompter.start()
-    orch = Orchestrator(cfg)
-
-    # Opt-in typed-text monitor (Linux + macOS). Never records apps on the private list.
-    monitor = None
-    if cfg.monitor_typed_content:
-        from . import typing_monitor as typing_monitor_mod     # pynput is optional, so load it only when asked for
-        monitor = typing_monitor_mod.TypingMonitor(clip_chars=cfg.typed_text_max_chars, blocked=settings.llm.private_apps)
-        try:
-            monitor.start()
-            print("Typed-text monitor on (memory only; F1 turns it off).", flush=True)
-        except RuntimeError as e:
-            print(f"Typed-text monitor not started: {e}", flush=True)
-    else:
-        print("Typed-text monitor off (enable with monitor_typed_content = true in private.toml).", flush=True)
-
-    want_screen = a.read_screen or settings.llm.read_screen
-    seen = {"screen_warned": False}
-
-    def look():
-        """The text in front of the user, if reading it is on, allowed and possible."""
-        if not want_screen:
-            return None
-        screen = read_screen(plat, settings.llm.private_apps, settings.llm.screen_chars)
-        if screen is None and not seen["screen_warned"]:
-            seen["screen_warned"] = True
-            why = plat.screen_error or "nothing readable in the front app (or it is on the private list)"
-            print(f"{time.strftime('%H:%M:%S')}  screen text not used: {why}")
-        return screen
-
-    def help_out(offer):
-        """The user pressed Help me: write the concrete help, from fresh text when it can be read."""
-        screen = look() or seen.get("screen")
-        try:
-            text = give_help(client, offer.proposal.task, seen.get("context", ""), screen)
-        except LLMError as e:
-            print(f"{time.strftime('%H:%M:%S')}  could not write the help ({e})")
-            return
-        print(f"          help: {text}")
-        bus.publish("help", text=text)
-        if presenter.dialog and ui.ask("SAIP", text, ("Close", "Copy"), timeout=180, default=False) == "Copy":
-            copy_to_clipboard(text)
-
-    def answered(offer, outcome):
-        orch.record_outcome(outcome)
-        if outcome != offers_mod.UNANSWERED:
-            extra = f" (quiet period x{orch.cooldown_mult:g})" if outcome != offers_mod.ACCEPTED else ""
-            print(f"{time.strftime('%H:%M:%S')}  offer {outcome}{extra}")
-        bus.publish("outcome", outcome=outcome, cooldown_mult=orch.cooldown_mult)
-        if outcome == offers_mod.ACCEPTED and client is not None:
-            help_out(offer)
-    presenter = offers_mod.OfferPresenter(ui, cfg.offer_timeout_s, use_dialog=not a.no_dialog, on_outcome=answered)
-    print(f"Watching on {plat.name}. Mode: {mode}\nCtrl-C to stop.\n")
-    last_status = 0.0
+    bus = Bus()
+    runtime = Runtime(bus, plat, aw, _run_options(a), ui=plat)
+    runtime.start()
+    print("Ctrl-C to stop.\n")
     try:
-        while True:
-            now = time.time()
-            if now - last_scan >= cfg.rescan_s:
-                accepted, declined = setup_mod.decisions()
-                plan = repos_mod.plan_sync(cfg, sys.executable, accepted, declined)
-                for st in plan.refresh:                      # accepted before, hook since lost: put it back quietly
-                    githook.install(st.path, sys.executable)
-                setup_mod.update_manifest(hooked_repos=[str(p) for p in plan.hooked + [s.path for s in plan.refresh]])
-                git.repos = plan.polled
-                for st in plan.new:                          # never hooked on their own: ask first
-                    prompter.submit(st)
-                last_scan = now
-            git.poll(now)
-            try:
-                trace = fetch_trace(aw, now, cfg.history_min * 60)
-                typed_text = monitor.get_current_text() if monitor is not None and monitor.running else None
-                tick = score_now(trace, now, typed_text=typed_text)
-                if a.trigger is not None:
-                    tick.theta_trig = a.trigger                # testing: wake the LLM at this score instead
-            except NotReady as e:
-                if now - last_status > 60:
-                    print(f"{time.strftime('%H:%M:%S')}  waiting: {e}")
-                    bus.publish("status", level="waiting", text=str(e))
-                    last_status = now
-                time.sleep(cfg.tick_s)
-                continue
-            except AWError as e:
-                print(f"{time.strftime('%H:%M:%S')}  {e}")
-                bus.publish("status", level="error", text=str(e))
-                time.sleep(15)
-                continue
-            bus.publish("tick", time=tick.time, score=round(tick.stuck_score, 4), paused=tick.paused,
-                        reason=tick.reason, trigger=tick.theta_trig)
-            if client is not None and now >= bus.quiet_until:      # the user can pause offers from the tray
-                def run_assess():
-                    typed = typed_for_model(typed_text)
-                    seen["context"] = build_context(trace, tick.time, settings.llm.lookback_s,
-                                                    settings.llm.include_titles, settings.llm.private_apps,
-                                                    typed_text=typed)
-                    return assess(client, settings, temps, seen["context"], tick.stuck_score)
-                try:
-                    ev = orch.step(now, tick, run_assess)
-                except LLMError as e:
-                    print(f"{time.strftime('%H:%M:%S')}  LLM error: {e}")
-                    bus.publish("status", level="error", text=f"LLM error: {e}")
-                    ev = None
-                    orch.last_assess = now
-                if ev:
-                    print(describe(now, tick, ev))
-                    d = ev.assessment.decision
-                    bus.publish("decision", decision=ev.kind, score=round(tick.stuck_score, 4), p_need=round(d.p_need, 4),
-                                p_accept=round(d.p_accept, 4), bar=round(d.tau, 4), resampled=ev.assessment.resampled)
-                    if ev.kind == "offer":
-                        proposal = FALLBACK
-                        seen["screen"] = look()
-                        if seen["screen"]:
-                            print(f"          (read {len(seen['screen'].text)} characters from {seen['screen'].app})")
-                        try:
-                            proposal = propose(client, seen["context"], orch.take_outcome(), screen=seen["screen"])
-                        except LLMError as e:
-                            print(f"{time.strftime('%H:%M:%S')}  could not write the offer ({e}); using the plain one")
-                        print(f"          >>> {proposal.message}")
-                        bus.publish("offer", message=proposal.message, task=proposal.task, generated=proposal.generated)
-                        if not presenter.dialog and a.notify:
-                            plat.notify("SAIP", proposal.message)
-                        presenter.submit(offers_mod.make_offer(now, ev.assessment.decision, ev.assessment.resampled, proposal))
-            if now - last_status >= 60:
-                state = f"paused ({tick.reason})" if tick.paused else "scoring"
-                print(f"{time.strftime('%H:%M:%S')}  status: {state}, stuck score {tick.stuck_score:.2f} "
-                      f"(LLM wakes above {tick.theta_trig:.2f})")
-                last_status = now
-            time.sleep(cfg.tick_s)
+        while runtime.running:
+            time.sleep(0.5)
     except KeyboardInterrupt:
-        if tray is not None and tray.poll() is None:
-            tray.terminate()
-        prompter.stop()
-        presenter.stop()
-        if monitor is not None:
-            monitor.stop()
-        print("\nStopped.")
-        return 0
+        pass
+    runtime.stop()
+    print("\nStopped.")
+    return 0
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="saip", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--url", default=DEFAULT_URL, help="ActivityWatcher server (default http://localhost:5600)")
+    ap.add_argument("--url", default=DEFAULT_URL, help="ActivityWatcher server (default http://127.0.0.1:5600)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run", help="set up on first run, then watch and decide")
-    r.add_argument("--setup", action="store_true", help="run setup again first")
-    r.add_argument("--yes", action="store_true", help="answer yes to every setup question")
+    r = sub.add_parser("run", help="start SAIP (dashboard, tray, agent); the first run is set up in the browser")
+    r.add_argument("--setup", action="store_true", help="run the terminal setup again first")
+    r.add_argument("--yes", action="store_true", help="answer yes to every terminal setup question")
     r.add_argument("--root", action="append", help="folder whose git repositories get the commit hook (repeatable)")
     r.add_argument("--no-setup", action="store_true", help="skip first-run setup and change nothing on this machine")
     r.add_argument("--trigger", type=float, help="testing: wake the LLM above this stuck score (0 = every assessment interval)")
-    r.add_argument("--mock-llm", action="store_true", help="use a deterministic stand-in for the model")
+    r.add_argument("--mock-llm", action="store_true", help="testing: use a deterministic stand-in for the model")
     r.add_argument("--notify", action="store_true", help="with --no-dialog, show a system notification when it speaks")
     r.add_argument("--no-dialog", action="store_true", help="print offers instead of asking with a dialog (no accept/dismiss)")
     r.add_argument("--read-screen", action="store_true",
                    help="read the text near your cursor when writing an offer (or set read_screen in private.toml)")
     r.add_argument("--config", help="path to private.toml")
-    r.add_argument("--ui", action="store_true", help="serve the dashboard and local API on this machine (offers appear there when it is open)")
-    r.add_argument("--tray", action="store_true", help='also show the tray icon and offer popup (implies --ui; needs pip install "saip[tray]")')
-    r.add_argument("--ui-port", type=int, default=server_mod.DEFAULT_PORT, help=f"port for --ui (default {server_mod.DEFAULT_PORT})")
+    r.add_argument("--no-ui", action="store_true", help="no dashboard and no tray: the terminal only, as before")
+    r.add_argument("--no-tray", action="store_true", help="no tray icon")
+    r.add_argument("--no-browser", action="store_true", help="do not open the dashboard in the browser")
+    r.add_argument("--ui", action="store_true", help=argparse.SUPPRESS)       # the dashboard is on by default now
+    r.add_argument("--tray", action="store_true", help=argparse.SUPPRESS)     # so is the tray
+    r.add_argument("--ui-port", type=int, default=server_mod.DEFAULT_PORT, help=f"dashboard port (default {server_mod.DEFAULT_PORT})")
     r.set_defaults(fn=cmd_run)
+    st = sub.add_parser("start", help="start SAIP in the background (no terminal has to stay open)")
+    st.add_argument("--config", help="path to private.toml")
+    st.add_argument("--no-browser", action="store_true", help="do not open the dashboard in the browser")
+    st.add_argument("--no-tray", action="store_true", help="no tray icon")
+    st.add_argument("--mock-llm", action="store_true", help="testing: use a deterministic stand-in for the model")
+    st.add_argument("--ui-port", type=int, default=server_mod.DEFAULT_PORT, help="dashboard port")
+    st.set_defaults(fn=cmd_start)
+    for name, fn, text in (("stop", cmd_stop, "stop a running SAIP"), ("status", cmd_status, "say whether SAIP is running")):
+        x = sub.add_parser(name, help=text)
+        x.add_argument("--ui-port", type=int, default=server_mod.DEFAULT_PORT, help="dashboard port")
+        x.set_defaults(fn=fn)
     s = sub.add_parser("setup", help="set everything up (safe to repeat)")
     s.add_argument("--yes", action="store_true")
     s.add_argument("--root", action="append", help="folder whose git repositories get the commit hook (repeatable)")
@@ -346,9 +375,9 @@ def main(argv=None) -> int:
     o = sub.add_parser("offers", help="show what happened to past offers")
     o.add_argument("--last", type=int, default=10, help="how many recent offers to list")
     o.set_defaults(fn=cmd_offers)
-    t = sub.add_parser("tray", help="tray icon and offer popup for an agent running with --ui")
+    t = sub.add_parser("tray", help="only the tray icon, for a SAIP already running")
     t.add_argument("--port", type=int, default=server_mod.DEFAULT_PORT, help="the agent's --ui-port")
-    t.set_defaults(fn=lambda a: tray_main(["--port", str(a.port)]))
+    t.set_defaults(fn=lambda a: __import__("saip.tray", fromlist=["main"]).main(["--port", str(a.port)]))
     u = sub.add_parser("uninstall", help="put the machine back as it was before SAIP")
     u.add_argument("--yes", action="store_true", help="do not ask before reverting")
     u.add_argument("--keep-config", action="store_true", help="keep private.toml and calibration.json")

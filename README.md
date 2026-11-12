@@ -1,238 +1,392 @@
 # SAIP
 
-Proactive agent research project: detect whether a user is in **flow** or **stuck**
-from background desktop telemetry, and interrupt only when it is worth it.
-See `docs/ProActive_Agent_Implementation_Plan.md` for the five-phase roadmap.
+SAIP is a small assistant that notices when you are stuck and offers help, but only when an offer is worth the
+interruption. It runs on your computer, watches how you work (which apps you use, how often you switch, whether
+commands fail), and asks a language model of your choice whether to speak up.
 
-## Layout
+It is a research project (CSE 576, Topics in NLP). It builds on ideas from
+[thunlp/ProactiveAgent](https://github.com/thunlp/ProactiveAgent) and the PRISM interruption paper.
+
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Using SAIP](#using-saip)
+- [What SAIP can see, and where it goes](#what-saip-can-see-and-where-it-goes)
+- [Settings](#settings)
+- [Windows, macOS and Linux](#windows-macos-and-linux)
+- [Removing SAIP](#removing-saip)
+- [For developers](#for-developers)
+- [Known limits](#known-limits)
+
+## How it works
 
 ```
-src/                       importable packages, side by side
-  synth/                     synthetic ActivityWatch day generator (Phase 1 fixtures): world, styles, generator, noise, writer, summary
-  classifier/                stuck-state classifier (Phase 2): loader, categories, features, scorer, evaluate, weights.json
-  llm/                       Phase 3: endpoint client, context, yes/no probes, calibration, state-aware gate, replay eval
-  saip/                      the app: `saip` command, first-run setup, ActivityWatcher client, live loop, OS adapters, hooks
-tests/                     mirrors src/
-  synth/ classifier/ llm/ saip/   pytest suites
-scripts/
-  generate_dataset.py        builds the shared multi-person dataset
-docs/
-  ProActive_Agent_Implementation_Plan.md
-data/                      generated output (gitignored)
-pyproject.toml             package metadata; `pip install -e .` puts the packages on the path and installs the `saip` command
-private.example.toml       template for private.toml (endpoint, gate costs, agent timings); private.toml is gitignored
-.github/workflows/ci.yml   runs the tests on macOS, Windows and Linux
-pytest.ini  requirements.txt
+ActivityWatch  ──►  stuck score  ──►  two yes/no questions  ──►  the gate  ──►  an offer
+(what you do)      (cheap, every      to your model            (is it worth     (notification,
+                    5 seconds)        (only when the score      interrupting?)   card, popup)
+                                       is high)
+```
+
+1. **ActivityWatch** is a free tracker that records which window is in front and when you type or click. SAIP reads
+   it. Nothing leaves your machine at this step.
+2. **The stuck score** is a number from 0 (in flow) to 1 (stuck), worked out every 5 seconds from the last few
+   minutes. It uses simple rules, not a model. The biggest clue is *circling*: going back again and again to the
+   same few windows. A paused score (you are away, in a meeting, or the screen is locked) is never treated as stuck.
+3. **Two yes/no questions** go to your model, but only when the score crosses a line: "does this person need help
+   right now?" and "would they accept an offer?". SAIP reads how sure the model is from its answer, not just the word.
+4. **The gate** compares the chance of "yes, they would accept" with a bar. The bar is lower when you look very stuck
+   and higher when you are deep in focus. Above the bar SAIP speaks. A near miss while you are in flow waits for a
+   natural pause. Otherwise it stays quiet.
+5. **An offer** is one short sentence. You can press **Help me** or **Not now**, or ignore it. After **Help me** the
+   model writes help, and you can carry on in a chat.
+
+How you answer changes how often SAIP speaks. Ignoring an offer makes it wait 1.5 times as long, dismissing one makes
+it wait twice as long (up to 4 times), and accepting resets the wait. The formulas are in
+[docs/State_Aware_Interruption_Formulas.md](docs/State_Aware_Interruption_Formulas.md).
+
+## Quick start
+
+You need Python 3.10 or newer and a language model behind an OpenAI-style endpoint that returns log-probabilities
+(vLLM, llama.cpp server or Ollama's `/v1` all work). ActivityWatch can be installed for you during setup.
+
+```bash
+git clone git@github.com:vignesh-kumar-v/SAIP.git
+cd SAIP
+python3 -m venv .venv
+source .venv/bin/activate        # on Windows: .venv\Scripts\activate
+pip install -e .
+saip run
+```
+
+`saip run` starts the agent, its dashboard and the tray icon, and opens your browser. **The first time, it opens a
+setup page** and walks you through everything. Nothing on your computer changes until you press the button for it.
+
+1. **ActivityWatch**: checks it is running, installs and starts it if missing, and shows whether its window, AFK and
+   input watchers are reporting.
+2. **Model (required)**: endpoint URL, model name and API key. SAIP tests the connection and saves it only if it
+   works. You cannot finish setup without a working model.
+3. **What the model can read**: typed text, screen text and window titles. All three start switched on. Turn off any
+   you want to keep on your machine.
+4. **Permissions**: what those need from your operating system, with a button for the right settings page and a
+   key-press test.
+5. **Blocked apps**: pick, from the apps installed on your machine, the ones SAIP must never read.
+6. **Terminal hook**: a few lines in your shell's start-up file that report whether each command succeeded or failed
+   (never the command itself).
+7. **Git folders**: a folder that holds your projects. SAIP adds a small hook to each repository that notes when you
+   commit. It asks once about repositories it finds, in a single prompt.
+8. **Review and start**.
+
+Want to look around first? This needs no ActivityWatch and no model, and changes nothing:
+
+```bash
+python -m saip.server --demo --speed 4
+```
+
+Open <http://localhost:5610/>. Add `--fresh` to start at the setup page.
+
+## Using SAIP
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `saip run` | Start SAIP. Press Ctrl-C to stop. A second `saip run` just opens the running one. |
+| `saip start` | The same, in the background. You can close the terminal. Output goes to `saip.log`. |
+| `saip stop` | Stop SAIP (also in the tray menu and in Settings). |
+| `saip status` | Say whether SAIP is running and what it is doing. |
+| `saip doctor` | Check every part and say what is wrong. |
+| `saip offers` | List what happened to past offers. |
+| `saip repo add\|list\|remove` | Choose which folders' git repositories get the commit hook. |
+| `saip setup` | The setup as questions in the terminal. Safe to repeat. |
+| `saip tray` | Only the tray icon, for a SAIP that is already running. |
+| `saip uninstall` | Put your machine back as it was. |
+
+Useful options for `saip run`: `--no-browser`, `--no-tray`, `--no-ui` (terminal only), `--config FILE`,
+`--ui-port N`, `--trigger 0` (ask the model every 30 seconds, for testing) and `--mock-llm` (a stand-in model, for
+checking that the parts connect).
+
+### The dashboard
+
+SAIP serves a dashboard at <http://localhost:5610/>.
+
+- **Live**: how you are doing right now in words ("Possibly stuck in Code"), the stuck score as a live chart with each
+  stuck stretch labelled by app, what pushed the score up or down, time stuck per app, the last decision, and a feed.
+- **Chat**: talk to the model about what you are doing (see below).
+- **History**: every offer and every time the model was asked, with CSV and JSONL export.
+- **Inspector**: the exact text the model was sent at each of the last 50 checks. This is kept in memory only.
+- **Settings**: the model, what it may read, blocked apps, chat tools, saved chats, notifications, ActivityWatch,
+  git folders, the terminal hook, timing and gate numbers, launch at login, and health checks. Changes apply at once.
+
+Offers and other questions appear as cards on every page. There is a dark and a light theme.
+
+### Offers, notifications and the tray
+
+Each offer shows up as a **system notification** (so you see it with the dashboard hidden), as a card in the
+dashboard, and, with no dashboard open, as a small popup or system dialog. There is no default button, so a stray
+Return key cannot answer for you. Answering in one place closes the others.
+
+The **tray icon** is the SAIP mark: a line that loops back on itself. It changes with your state (plain when in flow,
+a dot when possibly stuck, broken when paused, faint when SAIP is not running). Its menu lets you open the dashboard,
+pause offers (30 minutes, an hour, until tomorrow), switch the typed-text monitor and launch at login, open
+settings, and quit.
+
+### Help and chat
+
+After **Help me**, the model writes help. Before it answers it may *look* first: read a file, your uncommitted git
+changes, your screen text, or search the web if you switched that on. What it looked at is shown above its answer. A
+toast offers **Continue in chat**.
+
+The **Chat** page is a normal conversation, and it knows what you were doing in the last few minutes. You can:
+
+- reply to one earlier message, or just part of it (select text and press **Reply to this part**);
+- **edit** one of your messages and send it again, or **rewind** to it, which removes everything after it;
+- ask it to use tools (below). Replies are shown with Markdown: code in boxes with a Copy button, lists, bold.
+
+**Chat tools** (Settings → Chat tools):
+
+| Tool | What it does | Needs your approval? |
+|---|---|---|
+| Read your screen | The text near your cursor in the front app | No |
+| Activity summary | What you did in the last few minutes | No |
+| Git log and diff | Recent commits and uncommitted changes in your watched repositories | No |
+| Read a file | Text and code files inside your watched folders only | No |
+| Web search and open a page | DuckDuckGo by default, or Brave or Tavily with a key. **Off until you switch it on.** | No |
+| Copy to clipboard | Puts text you can see on your clipboard | **Yes** |
+| Write a file | Plain-text and code files inside your watched folders only. You see the whole file, or the changes if it exists. | **Yes** |
+
+It cannot write into other apps, make git commits, run commands, or touch anything inside `.git`. It can only
+propose; nothing happens until you press **Approve**. **Rewind puts written files back as they were**. A file you
+changed yourself in the meantime is left alone, and a clipboard copy or a web search cannot be undone (the dialog tells
+you before you confirm).
+
+Chats are kept in memory and disappear when SAIP stops. To keep them, switch on **Keep chats between runs**
+(Settings → Saved chats). They are then saved to `chats.jsonl` in the settings folder, readable only by you. Turning
+it off deletes the file, and **Delete all chats** empties it.
+
+### Running in the background and at login
+
+`saip start` runs SAIP without a terminal. **Launch at login** (Settings or the tray menu, off by default) starts it
+when you log in: a LaunchAgent on macOS, a registry `Run` entry on Windows, an autostart file on Linux.
+
+On macOS the permissions follow the app that started SAIP. From a terminal, they belong to that terminal. A background
+SAIP runs as plain Python, so macOS may ask again for Python itself (see [macOS](#macos)).
+
+### Git commit hooks
+
+The commit hook is a few lines at the top of `.git/hooks/post-commit`. It tells SAIP that a commit happened (a
+commit counts as progress and lowers the stuck score). It runs in the background and ignores errors, so it cannot slow
+down or break a commit. A repository is skipped, with the reason shown, if its hook cannot be added safely (for
+example it sets its own `core.hooksPath`). Those you accept anyway are checked by polling instead. While SAIP runs it
+looks for new repositories every few minutes and asks before adding one.
+
+## What SAIP can see, and where it goes
+
+Your **model endpoint** is the only place SAIP sends your information. It may be local or remote. If it is remote,
+everything in the table below that you leave switched on goes there.
+
+| What | Used for | Goes to the model? | How to control it |
+|---|---|---|---|
+| App names and how long you spent in each | The stuck score and the model's summary | Yes (names of blocked apps are replaced by "Private app") | Block list |
+| How many keys and clicks | The stuck score | Counts only, never the keys | n/a |
+| Window titles | A fuller summary | Only if switched on | Settings → What it reads |
+| What you type | Context for the offer and help | Only if switched on: the newest 200 characters, kept in memory | Settings → What it reads, block list, **Esc** clears it, **F1** turns it off |
+| Text near your cursor | Context for offers, help and the chat | Only if switched on, and only when an offer is written or the chat asks | Settings → What it reads, block list |
+| Whether terminal commands fail | The stuck score | An exit status and a hash, never the command | Remove the terminal hook |
+| Commits | The stuck score | The word "commit" only | Remove the git hook |
+| Files, git changes, web pages | Chat tools | Only what the model reads with a tool | Settings → Chat tools |
+| Your search words | Web search | To the search service, not the model | Web search is off by default |
+
+Some protections apply everywhere:
+
+- **One block list.** Apps on it are never named to the model, nothing typed in them is kept, and their screen text
+  is never read. It is matched by whole words, ignoring case and `.exe` or `.app`, so "Chrome" blocks "Google Chrome"
+  but "Mail" does not block "Gmail". Settings lists the apps installed on your machine to pick from.
+- **Secrets are masked** before text goes to the model: keys and tokens (such as `sk-…`, `ghp_…`, `AKIA…`),
+  `password:` and `api_key=` lines, and long random-looking strings. This is pattern-based, so it is a safety net, not a
+  guarantee.
+- **The block list works per app, not per field.** macOS hides keys from SAIP while a password box has focus, but
+  on other systems a password typed into an app you did not block can reach the typing buffer. Block browsers too if
+  that matters to you.
+- **The dashboard is local.** It listens on `127.0.0.1` only, refuses other host names, and accepts changes only as
+  JSON from its own pages, so a website you visit cannot change your settings or answer an offer. Your API key is
+  never sent back to the page.
+- **Local records.** `offers.jsonl` and `decisions.jsonl` hold numbers, the offer text and the app name. They do not
+  hold window titles, typed text or chat messages.
+- **Web pages are untrusted.** Text from the web is treated as data. Even if a page tells the model to do something,
+  the only actions it could reach are the two that need your Approve.
+
+## Settings
+
+Everything can be changed in the dashboard (Settings). Under the hood they live in `private.toml`, which is
+git-ignored and readable only by you. SAIP looks for it in this order: the file named by `--config`, `$SAIP_CONFIG`,
+`./private.toml`, then the settings folder. `private.example.toml` lists every setting with a comment. The ones you
+are most likely to want:
+
+| Setting | Meaning |
+|---|---|
+| `[llm] base_url`, `model`, `api_key` | Your model endpoint. The environment variables `SAIP_LLM_BASE_URL`, `SAIP_LLM_MODEL` and `SAIP_LLM_API_KEY` override them. |
+| `[llm] reasoning_effort` | Set to `"none"` for a "thinking" model, so its first word is the answer. |
+| `[llm] include_titles`, `read_screen` | Window titles and screen text go to the model. |
+| `[llm] private_apps` | The block list. |
+| `[llm] chat_tools`, `web_search`, `search_provider`, `search_api_key` | Chat tools and web search. |
+| `[agent] monitor_typed_content` | The typed-text monitor. |
+| `[agent] watch_roots` | Folders whose git repositories get the hook, and where chat tools may read and write. |
+| `[agent] notify_offers`, `keep_chats` | System notifications, and saving chats between runs. |
+| `[agent] cooldown_s`, `assess_interval_s`, `offer_timeout_s` | How often SAIP may speak. |
+| `[gate] c0`, `m0`, `alpha`, `beta`, `delta`, `theta_flow` | The costs in the decision rule. |
+
+**Where SAIP keeps its files:** `~/Library/Application Support/saip` on macOS, `%APPDATA%\saip` on Windows,
+`~/.config/saip` on Linux. It holds `setup.json` (what setup changed, so uninstall can undo it), `offers.jsonl`,
+`decisions.jsonl`, `calibration.json`, `saip.log`, and `chats.jsonl` if you keep chats.
+
+## Windows, macOS and Linux
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| Status | **Tested** | Written, not yet run on a real machine | Written, not yet run on a real machine |
+| Install ActivityWatch | Homebrew | winget | Download link |
+| Shell hook | zsh | PowerShell | bash |
+| Notifications | `osascript` | Toast | `notify-send` |
+| Question dialogs | `osascript` | Message box | `zenity` (else the terminal) |
+| Tray | Menu bar | System tray | Needs AppIndicator (GNOME needs an extension) |
+| Typed-text monitor and screen text | Needs permissions | Written, not yet run | X11 only (Wayland hides keys and windows) |
+
+"Not yet run" means the code follows the same interface and its logic is tested with the operating system calls faked.
+CI runs the tests on all three systems.
+
+### macOS
+
+Typed text and screen text need two permissions in **System Settings → Privacy & Security**:
+**Input Monitoring** and **Accessibility**. They are given to the app that started SAIP (Terminal, iTerm, VS Code).
+The setup page and Settings → What it reads have a button for each and a key-press test. After you switch one on,
+restart SAIP.
+
+If you cannot find the page in System Settings, this opens it directly:
+
+```bash
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+```
+
+For `saip start` and launch at login, give the same two permissions to Python itself
+(`…/Python.framework/Versions/3.x/Resources/Python.app`). Apps like Chrome do not expose their page text to the
+Accessibility API, so screen text may be empty there. Window titles and typed text still work.
+
+ActivityWatch's **input watcher** does not start by itself. In the ActivityWatch menu, open **Modules** and tick
+`aw-watcher-input`. The setup page tells you if it is not reporting.
+
+## Removing SAIP
+
+```bash
+saip uninstall
+```
+
+It lists everything SAIP changed, asks once, then reverses each change: the shell block, every commit hook (an existing
+hook returns byte for byte), the ActivityWatcher buckets SAIP created, launch at login, SAIP's own files (offers,
+decisions, saved chats, logs), ActivityWatch itself if SAIP installed it, and finally the `saip` command. A
+`private.toml` that existed before setup is left alone, and your recorded ActivityWatch history is never deleted.
+Options: `--keep-config` and `--keep-command`.
+
+## For developers
+
+### Layout
+
+```
+src/
+  synth/        synthetic ActivityWatch days, for developing without real data
+  classifier/   the stuck score: loader, app categories, features, scorer, evaluation, weights.json
+  llm/          the model side: client, prompts, probes, calibration, the gate, offers, chat, privacy, config
+  saip/         the app: command line, setup, live loop, API server, tray, platform adapters, hooks, chat tools
+frontend/       the dashboard (Vite, React, TypeScript, Tailwind); its build is committed in src/saip/ui/dist
+tests/          mirrors src/
+docs/           the roadmap, the gate's formulas, and notes for trying the dashboard and tray (UI_SETUP.md)
+scripts/        generate_dataset.py
+private.example.toml   every setting, with comments
 ```
 
 Everything runs from the repo root. New components get their own folder under `src/` and `tests/`.
 
-## Running
-
-The generator emits ActivityWatch-shaped events plus ground-truth labels, so the
-Phase 2 classifier can be developed before real data is available.
+### Tests
 
 ```bash
-pip install -r requirements.txt
-pip install -e .          # once: makes `python -m synth` and `python -m classifier` work (or prefix with PYTHONPATH=src)
-
-# one synthetic day
-python -m synth --seed 1 --out data/synthetic/day_seed1
-
-# the shared dataset: 20 people, 10 working days each, in data/synthetic
-python scripts/generate_dataset.py
-
-# tests
-pytest
+pip install -e ".[dev]"
+pytest                          # about 410 tests; CI runs them on macOS, Windows and Linux, Python 3.10 and 3.12
+cd frontend && npm install && npm test
 ```
 
-Each generated day contains `window/afk/input/web/terminal/fs` jsonl streams,
-`labels.jsonl` (state segments, ground truth only), `help_requests.jsonl`,
-`manifest.json` and an importable `aw-export.json`.
+### The dashboard source
 
-Each seed is a new person by default. To simulate one person across days, keep `--user`
-fixed and change `--seed` and `--date`:
+The dashboard is built into `src/saip/ui/dist` and committed, so running SAIP needs no Node. After changing
+`frontend/`:
 
 ```bash
-python -m synth --user 7 --seed 1 --date 2026-11-04 --out data/synthetic/user7/day1
-python -m synth --user 7 --seed 2 --date 2026-11-05 --out data/synthetic/user7/day2
+cd frontend
+npm install
+npm run build          # writes src/saip/ui/dist: commit it
+npm run dev            # hot reload on :5173, talking to a running SAIP or the demo on :5610
 ```
 
-Behaviours a loader or classifier has to cope with, as in real exports:
+### The local API
 
-- `aw-export.json` stores events newest first, so sort before use.
-- Web events keep counting while Chrome is in the background. Intersect them with Chrome window
-  events to get time actually spent on a page.
-- A sleeping laptop leaves gaps in window, AFK and web, while input keeps reporting zeros.
-- Coding has two gears: rapid hopping between editor, browser and terminal, and long deep stretches.
-  Both are flow, so busy switching alone says little about being stuck.
-- One person varies from day to day, for example directing an agent one day and hand-coding the next.
-- Opening a chatbot is not a stuck signal: `help_requests.jsonl` includes brainstorming and quick looks.
-- `terminal` and `fs` come from custom hooks and do not exist in a stock ActivityWatch install.
+`src/saip/server.py` lists every route in its header. `GET /api/events` streams ticks, decisions, stuck stretches,
+offers and outcomes as server-sent events; the dashboard and the tray are both clients of it. The tray is a separate
+process that uses only this API.
 
-Bucket ids mirror the real watchers (`aw-watcher-window_<host>`), so one loader
-reads both real and synthetic exports. Match buckets by **type**, not id: a
-hostname change on a real machine creates a second set of buckets.
+### Synthetic data
 
-## The app
-
-One command sets everything up the first time and then watches your machine:
+The generator writes ActivityWatch-shaped days with ground-truth labels, so the classifier can be built and checked
+without real data.
 
 ```bash
-pip install -e .
-saip run              # first run: set up, then watch and decide. Ctrl-C to stop.
-saip doctor           # check every moving part
-saip offers           # what happened to past offers: accepted, dismissed, ignored
-saip setup            # just the setup (safe to repeat)
-saip uninstall        # remove the shell hook (add --purge to delete private.toml too)
+python -m synth --seed 1 --out data/synthetic/day_seed1      # one day
+python scripts/generate_dataset.py                           # 20 people, 10 days each, in data/synthetic
+python -m synth --user 7 --seed 1 --date 2026-11-04 --out data/synthetic/user7/day1   # one person over several days
 ```
 
-First-run setup, in order, asking before anything changes your machine (`--yes` answers yes to all):
+Each day has `window`, `afk`, `input`, `web`, `terminal` and `fs` streams, `labels.jsonl` (ground truth, read only by
+evaluation), `help_requests.jsonl`, `manifest.json` and an importable `aw-export.json`. Real exports have quirks that
+the generator copies: events are stored newest first; web events keep counting while a browser is in the background; a
+sleeping laptop leaves gaps while input keeps reporting zeros; opening a chatbot is not a sign of being stuck; and
+`terminal` and `fs` come from SAIP's hooks, not from stock ActivityWatch. Match buckets by **type**, not by id.
 
-1. Checks ActivityWatcher is running, and installs and starts it if missing (Homebrew on macOS, winget on Windows,
-   a download link on Linux).
-2. Writes `private.toml` with your LLM endpoint and model.
-3. Adds a marked block to your shell start-up file (zsh, bash or PowerShell). It reports each command's exit
-   status only, never the command text, so failed commands and repeats are visible to the classifier.
-4. Asks for a folder that contains your git projects (for example `~/Developer`), lists every repository under it,
-   and after one confirmation adds a `post-commit` hook to each. The hook sends only the word "commit".
-5. Looks at what ActivityWatcher actually records. If window titles are empty or the input counts are all zero, a
-   macOS permission is missing, and it says which one.
-
-**Commit hooks.** Git runs `.git/hooks/post-commit` after every real commit, so the agent is told the moment a
-commit happens (a branch switch or pull does not count). The hook is added at the top of an existing hook without
-touching its lines, runs in the background and ignores errors, so it cannot slow down or break a commit.
-A repo is skipped, with the reason shown, when a hook cannot be added safely: it sets its own `core.hooksPath`
-(husky and similar), its hook is not a shell script, or the hook file is not executable. Skipped repos you accept
-are checked by polling `git rev-parse HEAD` instead.
-
-**New repositories.** While `saip run` is going it rescans your folders every few minutes. A repo it has not seen
-before is never hooked on its own: a dialog asks **Add / Not now / Never** (a terminal question where the system
-cannot show a dialog). Not now asks again next run, Never is remembered. Set `new_repos = "add"` or `"ignore"` in
-`private.toml` to change that. Manage folders with:
+### The classifier
 
 ```bash
-saip repo add ~/Developer     # find and hook every repo under it
-saip repo list                # each repo and whether its hook is working
-saip repo remove ~/Developer/old-project
+python -m classifier score --export aw-buckets-export.json --out scores.jsonl   # score any export
+python -m classifier evaluate --split dev                                       # check against synthetic labels
+python -m classifier evaluate --split dev --no-hooks                            # window, input and AFK only
 ```
 
-**Offers.** When the gate decides to speak, the model writes a one-line offer from the same behaviour summary
-(adapted from the prompt in [thunlp/ProactiveAgent](https://github.com/thunlp/ProactiveAgent)): it may say what
-pattern it noticed, and by default never what the problem is, because it does not see your work. A dialog shows it with
-**Help me / Not now**, with no default button so a stray Return cannot answer for you. As in that project, an offer
-ends as *accepted*, *dismissed* or *ignored* (no answer within `offer_timeout_s`, default 45 s). Ignoring stretches
-the quiet period after an offer by 1.5x and dismissing by 2x (up to 4x); accepting resets it. The last answer is also
-passed to the next offer's prompt. Every offer is appended to `offers.jsonl` in the settings folder: the gate's
-numbers, the offer text and the outcome, nothing about your windows or typing. `saip run --no-dialog` prints offers
-instead (`--notify` then shows a notification), and `saip offers` summarises the record.
+It is a hand-weighted logistic score over ten signals (circling, revisits, switching, stalling, reaching, typing, AI
+tools, failures, repeats, progress), smoothed over time, with no training and no GPU. Weights and thresholds are in
+`src/classifier/weights.json`, one profile with terminal and git hooks and one for stock ActivityWatch.
 
-**Dashboard and local API.** `saip run --ui` also serves a page at `http://localhost:5610/` (change with `--ui-port`):
-the stuck score over the last 30 minutes, the last gate decision in words, the offer record and the `saip doctor`
-checks. While the page is open, offers, the help text and the new-repository question appear there with the same
-buttons; with it closed they fall back to the system dialog. The page is one client of a small API (`saip/server.py`):
-`GET /api/events` streams every tick, decision, offer and outcome as server-sent events, and `POST /api/asks/<id>`
-answers an open question, so a tray popup or any other UI can use the same two calls. It listens on 127.0.0.1 only,
-refuses other hosts and cross-site POSTs, and carries scores, gate numbers and offer text: no window titles, no
-activity summary. `python -m saip.server --demo` serves the page with made-up activity, for working on a UI without
-ActivityWatcher or a model.
-
-**Tray icon and popup.** `pip install "saip[tray]"`, then `saip run --tray` (or `saip tray` beside an agent already
-running with `--ui`). The icon shows the state (in flow, possibly stuck, paused, agent not running) and its menu opens
-the dashboard or pauses offers for an hour. An offer appears as a small popup in the corner of the screen with the
-same buttons and time limit. The popup never takes the keyboard, so typing cannot answer it; whichever of the popup
-and the dashboard is answered first wins and the other closes. It is a separate process that uses only the API above.
-Written for Windows and Linux and not yet run on a real machine; on macOS, and where Python has no tkinter, the
-question falls back to the system dialog.
-
-**Context from your screen (opt-in).** thunlp gets its context from raw window titles and typed keys. SAIP's default
-only counts keys. `include_titles = true` adds window titles, the typed-text monitor (below) adds what you typed, and
-`read_screen = true` (or `saip run --read-screen`) reads the text around your cursor in the front app only at the
-moment an offer is written, so the offer can say what you are actually working on. All of these go to whichever model
-endpoint you configure, local or remote. Screen reading skips apps on the private list and password fields, masks
-keys and tokens, and keeps at most `screen_chars` (1200) characters. Pressing **Help me** then
-has the model write concrete help from the same text, shown in a dialog (with **Copy**); SAIP never types into your
-documents. On macOS the app running `saip` needs Accessibility (System Settings > Privacy & Security). Other systems
-do not read the screen yet.
-
-**Undoing it.** `saip uninstall` puts the machine back as it was before SAIP. Setup records every change it makes,
-and uninstall lists them, asks once, then reverses each: the shell block (and the profile file, if setup created
-it), every repo hook (an existing hook returns byte for byte), the buckets SAIP created in ActivityWatcher, the
-settings files setup wrote, ActivityWatcher itself if setup installed it, and finally the `saip` package. A
-`private.toml` that existed before setup is left alone, your recorded ActivityWatcher history is never deleted,
-and `--keep-config` / `--keep-command` keep the settings or the command.
-
-| | macOS | Windows | Linux |
-|---|---|---|---|
-| Status | tested | experimental | experimental |
-| Install ActivityWatcher | `brew install --cask` | `winget install` | link only |
-| Shell hook | zsh `~/.zshrc` | PowerShell `$PROFILE` | bash `~/.bashrc` |
-| Notification | `osascript` | toast | `notify-send` |
-| Dialogs (new repo, offers) | `osascript` | message box | `zenity` (else terminal) |
-
-"Experimental" means the adapter follows the same interface and its logic is covered by tests with the OS
-calls faked, but it has not been run on a real machine yet. The CI matrix runs those tests on all three systems.
-On Linux, ActivityWatcher's window watcher needs an X11 session; Wayland cannot see the focused window.
-`classifier/categories.py` also lists Windows and Linux app names on a best-effort basis: an unknown app counts
-as "other" and does not count as work, so extend the sets when a real export shows new names.
-
-**Typed-text monitor (opt-in, Linux and macOS).** Off by default. With `monitor_typed_content = true` and the
-optional extra installed (`pip install -e ".[typing]"`, which adds `pynput`; on macOS the app running `saip` needs
-Input Monitoring), SAIP keeps the newest `typed_text_max_chars` (200) typed characters in memory. It records only
-while an app on a short whitelist (editors, Word, browsers) is in front, never in an app on `private_apps`, and
-empties the buffer when you leave. Shortcuts are ignored, Esc clears the buffer, F1 turns it off. Nothing is written
-to disk or printed. The newest typed text is added to the behaviour summary the model sees, as thunlp/ProactiveAgent
-does with its `user_input`: it reaches the two yes/no questions, the offer and the help, whichever endpoint you
-configured (local or remote). Obvious secrets such as API keys and `password: ...` are masked first. The
-classifier score does not use it. The whitelist is per app, not per field, so a password box inside an allowed
-browser can still be read: drop the browser from the whitelist if that matters. Window titles are a separate switch
-(`include_titles = true`), and page or editor text comes from `read_screen`.
-
-**Privacy.** Unless you turn on the typed-text monitor, keys are counted, never recorded. The terminal hook sends an exit code and a hash, not the command.
-What the model sees is a short summary of app names, dwell times and counts; window titles stay out unless
-`include_titles = true`, typed text only with the monitor on (see above), and apps on `private_apps` are never named. Everything is sent only to the endpoint you
-configure.
-
-## The LLM layer (Phase 3)
-
-`src/llm` turns the classifier's stuck score plus two yes/no questions into speak, wait or quiet. The
-formulas and their derivation are in `docs/State_Aware_Interruption_Formulas.md` (`.html` is the rendered copy).
+### The decision layer
 
 ```bash
-python -m llm gate                                   # the bar tau for a grid of stuck scores
-python -m llm replay --mock --split dev              # run synthetic days through the pipeline, no model needed
-python -m llm replay --split dev --fit               # real endpoint: fit calibration temperatures on dev people
-python -m llm replay --split test                    # then report on the people held out
+python -m llm gate                                    # the bar for a grid of stuck scores
+python -m llm replay --mock --split dev               # run synthetic days through the pipeline, no model needed
+python -m llm replay --split dev --fit                # real endpoint: fit calibration on the dev people
+python -m llm replay --split test                     # report on the held-out people
 ```
 
-`--mock` is a deterministic stand-in that checks the plumbing and says nothing about a real model. The generator
-has no acceptance label, so `--fit` fits `T_accept` on the stuck label as a stand-in. Both caveats are printed.
-The synthetic labels come from our own generator, so replay numbers test the pipeline and are not evidence about
-real users.
+`--mock` is a stand-in that checks the plumbing and says nothing about a real model. The generator has no "would
+accept" label, so `--fit` uses the stuck label in its place. Both caveats are printed. Because the labels come from our own
+generator, replay numbers test the pipeline and are not evidence about real users.
 
-## Classifier
+### Roadmap
 
-A hand-weighted score from 0 (flow) to 1 (stuck), updated every 5 s and smoothed over time. It needs
-no training and no GPU. Run from the repo root:
+The five phases are in [docs/ProActive_Agent_Implementation_Plan.md](docs/ProActive_Agent_Implementation_Plan.md):
+data and ground truth, the state detector, the model and dynamic threshold, orchestration and interface, and
+end-to-end testing. Phases 1 to 4 are built. Phase 5 (using it for real and tuning) has only just started.
 
-```bash
-# score any ActivityWatch export, real or synthetic
-python -m classifier score --export aw-buckets-export.json --out scores.jsonl
+## Known limits
 
-# check the score against the synthetic labels; tune on dev, keep test for final checks
-python -m classifier evaluate --split dev
-python -m classifier evaluate --split dev --no-hooks    # window, input and AFK only
-```
-
-The strongest signal without terminal data is `circling`: many visits over 5 minutes to only a few
-windows. Rapid coding switches just as often but keeps reaching new files and pages.
-
-Weights and thresholds live in `src/classifier/weights.json`, with one profile for data with
-terminal and file hooks and one for stock ActivityWatch. Labels are read only by `evaluate`. They come
-from our own generator, so these results test the pipeline and are not evidence of real-world accuracy.
-
-## Not in the repo
-
-`aw-buckets-export.json` (a real ActivityWatch export) is gitignored on purpose —
-it is personal telemetry. Drop your own export in the repo root
-locally and it stays out of git.
+- Only macOS has been run on a real machine. Windows and Linux are untested beyond unit tests.
+- The stuck score ignores typing and reacts mostly to circling between windows, so focused work across two or three
+  windows can read as stuck, and testing SAIP itself looks like being stuck.
+- Browsers and some apps expose no page text, so "screen text" is often empty there.
+- A small local model (for example a 9B one) with tools will sometimes pick the wrong tool or skip one it needed.
+  Approval and the limits above keep that harmless, but answers will vary.
+- Web search through DuckDuckGo uses its public HTML page, which is unofficial and can change or rate-limit.
+- Evaluation numbers come from synthetic data. Nothing here shows how well SAIP works for real people yet.
+- `aw-buckets-export.json` (a real ActivityWatch export) is git-ignored on purpose: it is personal data. Put your own
+  in the repo root and it stays out of git.

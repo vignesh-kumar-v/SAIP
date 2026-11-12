@@ -1,50 +1,42 @@
-"""Opt-in typed-text monitor for SAIP (Linux + macOS).
+"""Typed-text monitor for SAIP (macOS, Windows, Linux on X11).
 
-Listens for key presses system-wide (via the optional `pynput` package) and keeps the most recent typed
-characters in a small in-memory buffer, so the agent can know roughly what the user is writing.
+Listens for key presses system-wide (via `pynput`) and keeps the most recent typed characters in a small
+in-memory buffer, so the agent knows roughly what you are writing, as in thunlp/ProactiveAgent's `user_input`.
 
 Safeguards, because this is a keystroke reader:
 
-* Off unless `monitor_typed_content = true` in private.toml, and `pynput` must be installed
-  (`pip install -e ".[typing]"`).
-* Only records while the front app is on the whitelist, and never while it is on the private list
-  (password managers, chat apps). Leaving such an app empties the buffer at once.
+* Off unless `monitor_typed_content = true` in private.toml (the setup wizard asks, with it ticked).
+* Records in every app except those on the block list (`llm.private_apps`, the same list the screen reader and
+  the activity summary use; see llm/privacy.py). Entering a blocked app empties the buffer at once, and when the
+  front app cannot be told nothing is recorded.
 * Shortcuts (Ctrl/Cmd/Alt held) are not typing and are ignored. Esc empties the buffer, F1 turns the
   monitor off.
 * Memory only: nothing is written to disk and, unless `echo=True` is passed, nothing is printed.
 
-Limit: the whitelist works per app, not per field, so a password box inside an allowed browser can still be
-read. Keep browsers off the whitelist if that matters to you.
+Limit: the block list works per app, not per field. macOS hides keys from listeners while a password field has
+focus (secure input), but elsewhere a password typed into an app that is not blocked can enter the buffer. Obvious
+secrets are masked (saip/screen.py `redact`) before any text goes to the model.
 """
 
 from __future__ import annotations
 
 import json
-import platform
-import re
-import subprocess
 import threading
 import time
 from collections import deque
 from typing import Callable, Deque, Optional
 
-try:                                    # optional dependency: the rest of SAIP must work without it
+from llm.privacy import is_blocked
+
+try:                                    # the rest of SAIP must import without it (or without a display, on Linux CI)
     from pynput import keyboard
-except ImportError:                     # pragma: no cover - depends on the environment
+except Exception:                       # pragma: no cover - depends on the environment
     keyboard = None
 
 # ------------------------------------------------------------------ config
 DEFAULT_CONFIG = {
     "typed_text_clip_chars": 200,          # how much of the newest text is handed out
     "typed_text_sentence_clip": 100,       # echo mode only: clip at the nearest sentence end
-    "foreground_app_whitelist": [
-        "code", "code-oss", "vscode",                    # VS Code
-        "word", "ms-word", "word.exe",                   # Word
-        "chrome", "google-chrome", "msedge",             # Chrome/Edge textareas
-        "textedit", "notepad", "gedit",                  # Simple editors
-        "emacs", "emacsclient",                          # Emacs
-        "nano", "vim",                                   # Terminal editors
-    ],
     "poll_interval_s": 1.0,        # how often the front app is re-checked
     "emit_interval_s": 5,          # echo mode only; matches TICK_S in features.py
     "max_buffer_chars": 500,       # cap internal buffer
@@ -56,24 +48,6 @@ STOP_KEY = "f1"
 
 
 # ------------------------------------------------------------------ helpers
-def _contains(app_name: str, names) -> bool:
-    """Substring match, case insensitive. Used for the block list, where over-matching is the safe error."""
-    low = app_name.lower()
-    return any(n.lower() in low for n in names)
-
-
-def _is_listed(app_name: str, names) -> bool:
-    """Whole-word match, case insensitive: 'word' matches 'Microsoft Word' but not '1Password', 'code' not 'Xcode'."""
-    low = app_name.lower()
-    words = set(re.findall(r"[a-z0-9._-]+", low))
-    return any(n.lower() == low or n.lower() in words for n in names)
-
-
-def _is_text_app(app_name: str) -> bool:
-    """Is the foreground app on the whitelist?"""
-    return _is_listed(app_name, DEFAULT_CONFIG["foreground_app_whitelist"])
-
-
 def _key_to_char(key) -> Optional[str]:
     """The printable character a pynput key stands for, or None."""
     c = getattr(key, "char", None)
@@ -81,41 +55,28 @@ def _key_to_char(key) -> Optional[str]:
 
 
 def _get_foreground_app_name() -> Optional[str]:
-    """Foreground app name (macOS) or window title (Linux), or None when it cannot be told."""
+    """The app in front, as this OS names it (see saip/platform/apps.py), or None when it cannot be told."""
     try:
-        system = platform.system()
-        if system == "Darwin":
-            result = subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to name of first process whose frontmost is true'],
-                capture_output=True, text=True, timeout=1)
-            return result.stdout.strip() or None
-        if system == "Linux":
-            result = subprocess.run(["xdotool", "getwindowfocus", "getwindowname"],
-                                    capture_output=True, text=True, timeout=1)
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip()
+        from .platform import current
+        return current().front_app()
     except Exception:
-        pass
-    return None
+        return None
 
 
 # ------------------------------------------------------------------ monitor class
 class TypingMonitor:
-    """System-wide typed-text buffer, active only while an allowed app is in front."""
+    """System-wide typed-text buffer, active whenever the app in front is not blocked."""
 
     def __init__(
         self,
         max_buffer: int = DEFAULT_CONFIG["max_buffer_chars"],
         clip_chars: int = DEFAULT_CONFIG["typed_text_clip_chars"],
-        whitelist=None,
         blocked=(),
         echo: bool = False,
         emit_interval: float = DEFAULT_CONFIG["emit_interval_s"],
         foreground: Callable[[], Optional[str]] = _get_foreground_app_name,
     ):
         self.clip_chars = clip_chars
-        self.whitelist = tuple(DEFAULT_CONFIG["foreground_app_whitelist"] if whitelist is None else whitelist)
         self.blocked = tuple(blocked)
         self.echo = echo
         self.emit_interval = emit_interval
@@ -128,6 +89,8 @@ class TypingMonitor:
         self._running = False
         self._listener = None
         self._threads: list[threading.Thread] = []
+        self.presses = 0                 # key presses received (a count only), so a UI can tell the listener works
+        self.app: Optional[str] = None   # the app last seen in front
 
     # ---- public API ------------------------------------------------------------------
     @property
@@ -139,8 +102,7 @@ class TypingMonitor:
         if self._running:
             return
         if keyboard is None:
-            raise RuntimeError("typed-text monitoring needs the optional 'pynput' package: "
-                               'pip install -e ".[typing]"')
+            raise RuntimeError("typed-text monitoring needs the 'pynput' package: pip install -e .")
         self._running = True
         self._clear()
         self.refresh_allowed()
@@ -167,13 +129,20 @@ class TypingMonitor:
     def get_current_text(self) -> str:
         """The newest `clip_chars` typed characters."""
         with self._lock:
-            return "".join(self._buffer)[-self.clip_chars:]
+            full = "".join(self._buffer)
+        text = full[-self.clip_chars:]
+        if len(full) > len(text) and not full[-len(text) - 1].isspace() and not text[0].isspace():
+            cut = text.find(" ", 0, 40)                  # the first word was cut in half: start at the next one
+            if cut != -1:
+                text = text[cut + 1:]
+        return text
 
     # ---- foreground check ------------------------------------------------------------
     def refresh_allowed(self) -> bool:
-        """Re-read the front app. Leaving an allowed app (or entering a blocked one) empties the buffer."""
+        """Re-read the front app. Entering a blocked app (or one that cannot be told) empties the buffer."""
         app = self.foreground()
-        allowed = bool(app) and _is_listed(app, self.whitelist) and not _contains(app, self.blocked)
+        self.app = app
+        allowed = bool(app) and not is_blocked(app, self.blocked)
         if not allowed:
             self._clear()
         self._allowed = allowed
@@ -187,6 +156,7 @@ class TypingMonitor:
     # ---- key handling ----------------------------------------------------------------
     def handle_key(self, key) -> Optional[bool]:
         """Process one key press. Returns False to stop the listener (the F1 toggle)."""
+        self.presses += 1
         name = getattr(key, "name", None)
         if name in MODIFIERS:
             self._held.add(name)
@@ -256,7 +226,7 @@ class TypingMonitor:
 # ------------------------------------------------------------------ CLI entry point
 def run_typing_monitor() -> None:
     """Standalone: print the typed text as JSON lines. Needs `pynput`; press F1 to stop."""
-    print("SAIP typing monitor (Linux + macOS). Press F1 to stop. On macOS grant Input Monitoring.", flush=True)
+    print("SAIP typing monitor. Press F1 to stop. On macOS grant Input Monitoring.", flush=True)
     monitor = TypingMonitor(echo=True)
     monitor.start()
     try:

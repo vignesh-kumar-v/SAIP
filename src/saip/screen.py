@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from llm.privacy import is_blocked
+
 TERMINALS = ("terminal", "iterm", "ghostty", "kitty", "wezterm", "alacritty", "warp", "hyper", "tabby")
 SEP = "<<SAIP>>"
 MIN_CHARS = 20                       # less than this is a blank page, not context
@@ -41,15 +43,57 @@ def redact(text: str) -> str:
     return text
 
 
+CUT, CURSOR = "[…]", "▌"
+_BREAK = re.compile(r"\n|[.!?][\"')\]]*\s")
+
+
+def _clean_start(text: str, start: int, cursor: int, room: int) -> int:
+    """Move a cut start forward to the next line or sentence start (else the next space), never past the cursor."""
+    stop = min(start + room, cursor if cursor > start else start + room, len(text))
+    m = _BREAK.search(text, start, stop)
+    if m:
+        return m.end()
+    sp = text.find(" ", start, stop)
+    return sp + 1 if sp != -1 else start
+
+
+def _clean_end(text: str, end: int, cursor: int, room: int) -> int:
+    """Move a cut end back to the last line or sentence end (else the last space), never before the cursor."""
+    lo = max(end - room, cursor if 0 < cursor < end else end - room, 0)
+    ends = [m.end() for m in _BREAK.finditer(text, lo, end)]
+    if ends:
+        return ends[-1]
+    sp = text.rfind(" ", lo, end)
+    return sp if sp != -1 else end
+
+
 def window_text(text: str, cursor: int, limit: int, tail: bool) -> str:
-    """At most `limit` characters: the end of a terminal, or the stretch around the cursor in a document."""
+    """At most about `limit` characters: the end of a terminal, or the stretch around the cursor in a document.
+
+    The excerpt starts and ends at a line, sentence or word boundary, never mid-word; "[…]" marks each side that was
+    cut, and "▌" marks the cursor, so the model can tell where the text was trimmed from where the person stopped.
+    """
     text = text.replace("\r", "\n")
+    has_cursor = not tail and 0 < cursor <= len(text)          # 0 is what macOS reports when it does not know
     if len(text) <= limit:
-        return text.strip()
+        out = text[:cursor] + CURSOR + text[cursor:] if has_cursor and text.strip() else text
+        return out.strip()
+    limit = max(20, limit - 2 * (len(CUT) + 1) - len(CURSOR))      # room for the markers, so the result stays within it
     if tail or cursor <= 0 or cursor > len(text):
-        return text[-limit:].strip()
+        start, end = len(text) - limit, len(text)
+        start = _clean_start(text, start, -1, limit // 4)
+        out = text[start:end].strip()
+        return (CUT + " " + out) if start > 0 else out
     start = max(0, min(cursor - limit // 2, len(text) - limit))
-    return text[start:start + limit].strip()
+    end = min(len(text), start + limit)
+    if start > 0:
+        start = _clean_start(text, start, cursor, limit // 4)
+    if end < len(text):
+        end = _clean_end(text, end, cursor, limit // 4)
+    cur = cursor - start
+    body = text[start:end]
+    body = body[:cur] + CURSOR + body[cur:]
+    return ((CUT + " ") if start > 0 else "") + body.strip() + ((" " + CUT) if end < len(text) else "")
 
 
 def parse(output: str, private_apps: tuple, limit: int) -> Screen | None:
@@ -57,7 +101,7 @@ def parse(output: str, private_apps: tuple, limit: int) -> Screen | None:
     if len(parts) != 3:
         return None
     app, cur, text = parts[0].strip(), parts[1].strip(), parts[2]
-    if not app or any(p.lower() == app.lower() for p in private_apps):
+    if not app or is_blocked(app, private_apps):
         return None
     try:
         cursor = int(float(cur))
