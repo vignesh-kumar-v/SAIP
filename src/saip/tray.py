@@ -1,18 +1,22 @@
 """The tray icon and the offer popup. A second client of the local API, next to the dashboard.
 
-    saip run --tray      the agent, its API and this tray together
-    saip tray            only the tray, for an agent already running with --ui
+    saip run             the agent, its dashboard and this tray together (the default)
+    saip tray            only the tray, for an agent already running
 
-It is a separate process and talks to the agent only through saip/server.py: it reads /api/events to colour the
-icon and learn of questions, and posts the answer back. Nothing in the live loop knows it exists.
+It is a separate process and talks to the agent only through saip/server.py: it reads /api/events to draw the
+icon and learn of questions, and posts answers and menu choices back. Nothing in the live loop knows it exists.
+
+The icon is the SAIP mark (saip/icons.py), drawn per state. On macOS it is a template image, so the menu bar
+recolours it for light and dark; elsewhere it is a small tile in the state's colour.
+
+macOS only lets the main thread touch the menu bar. pystray's icon owns that thread there, so every change to the
+icon, its tooltip or its menu is handed to the main thread (`_on_main`); doing it from another thread crashes the
+process without a word, which is why the icon used to vanish a few seconds after it appeared.
 
 The popup sits in the corner of the screen and never takes the keyboard: on Windows the window is marked
 no-activate, so a Return key from someone still typing cannot answer for them; buttons work by mouse only.
 Where a popup window cannot be drawn (macOS, where the tray icon and Tk both need the main thread, or a Python
 without tkinter) the question is shown with the system dialog the app already uses.
-
-Needs `pip install "saip[tray]"` (pystray and Pillow). They are imported only inside `main`, so the rest of the
-package, and the tests, work without them.
 """
 from __future__ import annotations
 
@@ -27,13 +31,14 @@ import urllib.error
 import urllib.request
 import webbrowser
 
+from . import icons
 from .server import DEFAULT_PORT
 
-FLOW, STUCK, PAUSED, WAITING, OFFLINE = "flow", "stuck", "paused", "waiting", "offline"
+FLOW, STUCK, PAUSED, WAITING, OFFLINE = icons.FLOW, icons.STUCK, icons.PAUSED, icons.WAITING, icons.OFFLINE
 WORDS = {FLOW: "in flow", STUCK: "possibly stuck", PAUSED: "paused", WAITING: "waiting for activity",
          OFFLINE: "agent not running"}
-COLOURS = {FLOW: "#1F7A80", STUCK: "#B4620C", PAUSED: "#8A98A6", WAITING: "#8A98A6", OFFLINE: "#8A98A6"}
-INK, LIGHT, EDGE, TIMER = "#13233A", "#F2F6F8", "#6F8196", "#7FD0D6"
+COLOURS = icons.COLOURS
+INK, LIGHT, EDGE, TIMER = "#0E1116", "#F2F5F7", "#4A5563", "#12A39A"
 PAUSE_MIN = 60
 RETRY_S = 3.0
 _OPEN = urllib.request.build_opener(urllib.request.ProxyHandler({}))      # localhost never goes through a proxy
@@ -61,12 +66,13 @@ class Client:
     """Follows the agent's event stream and reports what changed as (name, payload) pairs on `out`.
 
     Names: "state" (payload is the tooltip text; read `.state`), "ask" (a question to show), "ask-closed" (its id),
-    "gone" (the stream ended after having worked: the agent has stopped).
+    "app" (the agent's settings changed; read `.app`), "gone" (the stream ended after having worked).
     """
 
     def __init__(self, base: str, out: queue.Queue | None = None, retry_s: float = RETRY_S):
         self.base, self.out, self.retry_s = base.rstrip("/"), out or queue.Queue(), retry_s
         self.state, self.tick, self.quiet_until = OFFLINE, None, 0.0
+        self.app: dict = {}
         self.connected_once = False
         self._stop = threading.Event()
 
@@ -74,10 +80,17 @@ class Client:
     def _post(self, path: str, body: dict) -> bool:
         req = urllib.request.Request(self.base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
         try:
-            with _OPEN.open(req, timeout=5) as r:
+            with _OPEN.open(req, timeout=10) as r:
                 return r.status == 200
         except (urllib.error.URLError, OSError):
             return False
+
+    def _get(self, path: str) -> dict | None:
+        try:
+            with _OPEN.open(self.base + path, timeout=5) as r:
+                return json.loads(r.read())
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
 
     def answer(self, ask_id: int, button: str) -> bool:
         return self._post(f"/api/asks/{ask_id}", {"button": button})
@@ -85,6 +98,21 @@ class Client:
     def pause(self, minutes: float) -> bool:
         """Hold offers back for this long; 0 lets them through again."""
         return self._post("/api/pause", {"minutes": minutes})
+
+    def set_typing(self, on: bool) -> bool:
+        return self._post("/api/settings", {"agent": {"monitor_typed_content": bool(on)}})
+
+    def set_autostart(self, on: bool) -> bool:
+        return self._post("/api/autostart", {"enabled": bool(on)})
+
+    def shutdown(self) -> bool:
+        return self._post("/api/shutdown", {})
+
+    def refresh_app(self) -> None:
+        got = self._get("/api/app")
+        if got:
+            self.app = got
+            self.out.put(("app", None))
 
     @property
     def quiet(self) -> bool:
@@ -102,12 +130,18 @@ class Client:
             self._set(state_of(self.tick))
             for ask in data.get("asks", []):
                 self.out.put(("ask", ask))
+            threading.Thread(target=self.refresh_app, daemon=True).start()
         elif kind == "tick":
-            self.tick = data
-            self._set(state_of(data))
+            prev, self.tick = self.state, data
+            new = state_of(data)
+            if new != prev or self.out.qsize() < 3:
+                self._set(new)
         elif kind == "quiet":
             self.quiet_until = data.get("until", 0.0)
             self._set(self.state)
+        elif kind == "app":
+            self.app = {**self.app, **{k: v for k, v in data.items() if k not in ("id", "kind", "at")}}
+            self.out.put(("app", None))
         elif kind == "ask":
             self.out.put(("ask", data))
         elif kind == "ask-closed":
@@ -150,24 +184,40 @@ class Client:
 
 
 # ------------------------------------------------------------------------------------------------ the icon
-def icon_image(state: str, size: int = 64):
-    """A disc in the state's colour, with a mark so the states differ by shape as well as colour."""
-    from PIL import Image, ImageDraw
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d, pad, c = ImageDraw.Draw(img), size // 10, size // 2
-    box = (pad, pad, size - pad, size - pad)
-    if state == OFFLINE:
-        d.ellipse(box, outline=COLOURS[state], width=size // 8)
-        return img
-    d.ellipse(box, fill=COLOURS[state])
-    if state == STUCK:                                           # a white dot
-        r = size // 7
-        d.ellipse((c - r, c - r, c + r, c + r), fill="white")
-    elif state in (PAUSED, WAITING):                             # two bars
-        w, h, gap = size // 9, size // 4, size // 12
-        d.rectangle((c - gap - w, c - h, c - gap, c + h), fill="white")
-        d.rectangle((c + gap, c - h, c + gap + w, c + h), fill="white")
-    return img
+def icon_image(state: str, size: int = 64, template: bool | None = None):
+    """The SAIP mark for a state (see saip/icons.py)."""
+    template = sys.platform == "darwin" if template is None else template
+    return icons.render(state, size, template=template)
+
+
+def _mac_template(icon) -> None:
+    """Have pystray hand the image to macOS as a template, at the menu bar's real pixel density."""
+    import AppKit
+    import Foundation
+    import io
+
+    def assert_image():
+        thickness = icon._status_bar.thickness()
+        if icon._icon_image is not None:
+            return
+        b = io.BytesIO()
+        icon._icon.save(b, "png")
+        img = AppKit.NSImage.alloc().initWithData_(Foundation.NSData(b.getvalue()))
+        side = thickness * 0.9
+        img.setSize_((side, side))
+        img.setTemplate_(True)
+        icon._icon_image = img
+        icon._status_item.button().setImage_(img)
+    icon._assert_image = assert_image
+
+
+def _on_main(fn) -> None:
+    """Run fn on the thread that owns the menu bar (macOS); elsewhere pystray is thread-safe enough to call now."""
+    if sys.platform == "darwin":
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(fn)
+    else:
+        fn()
 
 
 # ------------------------------------------------------------------------------------------------ the popup
@@ -217,8 +267,9 @@ class Popups:
         win.attributes("-topmost", True)
         win.configure(bg=INK)
         font = ("Segoe UI", 11) if sys.platform.startswith("win") else ("Helvetica", 11)
+        tk.Label(win, text="SAIP", bg=INK, fg=TIMER, font=font + ("bold",), anchor="w").pack(fill="x", padx=20, pady=(14, 0))
         tk.Label(win, text=ask["message"], bg=INK, fg=LIGHT, font=font, justify="left", anchor="w",
-                 wraplength=self.WIDTH - 40).pack(fill="x", padx=20, pady=(18, 12))
+                 wraplength=self.WIDTH - 40).pack(fill="x", padx=20, pady=(6, 12))
         row = tk.Frame(win, bg=INK)
         row.pack(fill="x", padx=20, pady=(0, 16))
         last = len(ask["buttons"]) - 1
@@ -229,7 +280,7 @@ class Popups:
                       activebackground=LIGHT if yes else EDGE, activeforeground=INK if yes else LIGHT,
                       highlightthickness=1, highlightbackground=EDGE,
                       command=lambda n=name: self.on_answer(ask["id"], n)).pack(side="left", padx=(0, 10))
-        bar = tk.Frame(win, bg=TIMER, height=4, width=self.WIDTH)       # time left to answer
+        bar = tk.Frame(win, bg=TIMER, height=3, width=self.WIDTH)       # time left to answer
         bar.pack(anchor="w")
         self.open[ask["id"]] = win
         win.update_idletasks()
@@ -283,19 +334,87 @@ def _dialog_asker(client: Client):
     return show
 
 
+# ------------------------------------------------------------------------------------------------ one at a time
+class _Lock:
+    """One tray per user: a second `saip tray` would put a second icon next to the first."""
+
+    def __init__(self):
+        from llm.config import user_config_dir
+        self.path = user_config_dir() / "tray.lock"
+        self.f = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(self.path, "a+")
+        try:
+            if sys.platform.startswith("win"):
+                import msvcrt
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            self.f.close()
+            self.f = None
+            return False
+
+
+def build_menu(pystray, client: Client, port: int, events: queue.Queue):
+    """The tray menu. Items read the latest state each time the menu is drawn."""
+    page = lambda path="": (lambda icon, item: webbrowser.open(f"http://localhost:{port}/{path}"))
+
+    def until_tomorrow() -> float:
+        t = time.localtime()
+        tomorrow = time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 9, 0, 0, 0, 0, -1))
+        return max(1.0, (tomorrow - time.time()) / 60)
+
+    def status_text(item) -> str:
+        words = tooltip(client.state, client.tick, client.quiet_until).removeprefix("SAIP: ")
+        app = (client.tick or {}).get("app")
+        return f"SAIP: {words}" + (f" in {app}" if app and client.state == STUCK else "")
+
+    typing_on = lambda item: bool(client.app.get("monitor_typed_content"))
+    auto_on = lambda item: bool(client.app.get("autostart"))
+    pause = lambda minutes: (lambda icon, item: client.pause(minutes() if callable(minutes) else minutes))
+    return pystray.Menu(
+        pystray.MenuItem(status_text, None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Open dashboard", page(), default=True),
+        pystray.MenuItem("Pause offers", pystray.Menu(
+            pystray.MenuItem("For 30 minutes", pause(30)),
+            pystray.MenuItem("For an hour", pause(60)),
+            pystray.MenuItem("Until tomorrow morning", pause(until_tomorrow)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Let offers through again", pause(0), enabled=lambda item: client.quiet))),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Typed-text monitor", lambda icon, item: client.set_typing(not typing_on(item)),
+                         checked=typing_on, enabled=lambda item: client.state != OFFLINE),
+        pystray.MenuItem("Launch at login", lambda icon, item: client.set_autostart(not auto_on(item)),
+                         checked=auto_on, enabled=lambda item: client.state != OFFLINE),
+        pystray.MenuItem("Settings…", page("settings")),
+        pystray.MenuItem("Health check…", page("settings#health")),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("Quit SAIP", lambda icon, item: events.put(("quit-all", None))))
+
+
 # ------------------------------------------------------------------------------------------------ putting it together
 def main(argv=None) -> int:
     import argparse
-    ap = argparse.ArgumentParser(prog="saip tray", description="Tray icon and offer popup for a running `saip run --ui`.")
+    ap = argparse.ArgumentParser(prog="saip tray", description="Tray icon and offer popup for a running `saip run`.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"the agent's --ui-port (default {DEFAULT_PORT})")
-    ap.add_argument("--follow", action="store_true", help="quit when the agent stops (used by `saip run --tray`)")
+    ap.add_argument("--follow", action="store_true", help="quit when the agent stops (used by `saip run`)")
     a = ap.parse_args(argv)
     try:
         import pystray
     except Exception as e:                                       # not installed, or no desktop session to draw on
         print(f"The tray icon needs pystray and Pillow and a desktop session ({e}).\n"
-              'Install them with: pip install "saip[tray]"', file=sys.stderr)
+              'Install them with: pip install -e .', file=sys.stderr)
         return 2
+    lock = _Lock()
+    if not lock.acquire():
+        print("A SAIP tray icon is already running.", file=sys.stderr)
+        return 0
     # 127.0.0.1, not "localhost": Windows tries IPv6 first and waits about two seconds before falling back, on every call
     base = f"http://127.0.0.1:{a.port}"
     events: queue.Queue = queue.Queue()
@@ -309,32 +428,42 @@ def main(argv=None) -> int:
         except Exception:
             use_tk = False
 
-    def toggle_pause(icon, item):
-        client.pause(0 if client.quiet else PAUSE_MIN)
-
-    menu = pystray.Menu(
-        pystray.MenuItem("Open dashboard", lambda icon, item: webbrowser.open(f"http://localhost:{a.port}/"), default=True),
-        pystray.MenuItem(lambda item: "Let offers through again" if client.quiet else "Pause offers for an hour", toggle_pause),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Quit the tray", lambda icon, item: events.put(("quit", None))))
-    icon = pystray.Icon("saip", icon_image(OFFLINE), tooltip(OFFLINE, None, 0.0), menu)
+    icon = pystray.Icon("saip", icon_image(OFFLINE), tooltip(OFFLINE, None, 0.0),
+                        build_menu(pystray, client, a.port, events))
+    if sys.platform == "darwin":
+        try:
+            _mac_template(icon)
+        except Exception:
+            pass
     if use_tk:
         popups = Popups(root, client.answer)
         show_ask, close_ask, close_all = popups.show, popups.close, popups.close_all
     else:
         show_ask, close_ask, close_all = _dialog_asker(client), (lambda _id: None), (lambda: None)
+    drawn = {"state": None}
+
+    def redraw(tip: str) -> None:
+        if drawn["state"] != client.state:
+            icon.icon = icon_image(client.state)
+            drawn["state"] = client.state
+        icon.title = tip
+        icon.update_menu()
 
     def handle(name, payload) -> bool:
         """Apply one change. False means it is time to quit."""
         if name == "state":
-            icon.icon, icon.title = icon_image(client.state), payload
-            icon.update_menu()
+            _on_main(lambda: redraw(payload))
             if client.state == OFFLINE:                          # the agent is gone, so nothing can be answered
                 close_all()
+        elif name == "app":
+            _on_main(icon.update_menu)
         elif name == "ask":
             show_ask(payload)
         elif name == "ask-closed":
             close_ask(payload)
+        elif name == "quit-all":
+            if not client.shutdown():                            # no agent to stop: just leave
+                return False
         elif name == "quit" or (name == "gone" and a.follow):
             return False
         return True
@@ -362,13 +491,14 @@ def main(argv=None) -> int:
         def pump_thread():
             while handle(*events.get()):
                 pass
-            icon.stop()
+            _on_main(icon.stop)
         threading.Thread(target=pump_thread, daemon=True, name="saip-tray-pump").start()
         icon.run()
     client.stop()
-    stopper = threading.Thread(target=icon.stop, daemon=True)    # takes the icon out of the tray
-    stopper.start()
-    stopper.join(2.0)
+    if use_tk:
+        stopper = threading.Thread(target=icon.stop, daemon=True)    # takes the icon out of the tray
+        stopper.start()
+        stopper.join(2.0)
     sys.stdout.flush()
     os._exit(0)          # some tray backends leave a thread running after stop; there is nothing here left to save
 
