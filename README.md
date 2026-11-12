@@ -76,28 +76,40 @@ hostname change on a real machine creates a second set of buckets.
 
 ## The app
 
-One command sets everything up the first time and then watches your machine:
+One command starts everything:
 
 ```bash
 pip install -e .
-saip run              # first run: set up, then watch and decide. Ctrl-C to stop.
+saip run              # the agent, its dashboard (opens in your browser) and the tray icon. Ctrl-C to stop.
 saip doctor           # check every moving part
 saip offers           # what happened to past offers: accepted, dismissed, ignored
-saip setup            # just the setup (safe to repeat)
-saip uninstall        # remove the shell hook (add --purge to delete private.toml too)
+saip setup            # the same setup as questions in the terminal (safe to repeat)
+saip tray             # only the tray icon, for a SAIP already running
+saip uninstall        # put the machine back as it was before SAIP
 ```
 
-First-run setup, in order, asking before anything changes your machine (`--yes` answers yes to all):
+The first `saip run` opens `http://localhost:5610/welcome` and sets everything up in the browser, step by step.
+Nothing on your machine changes until you press the button for it, and the agent starts when you finish:
 
-1. Checks ActivityWatcher is running, and installs and starts it if missing (Homebrew on macOS, winget on Windows,
-   a download link on Linux).
-2. Writes `private.toml` with your LLM endpoint and model.
-3. Adds a marked block to your shell start-up file (zsh, bash or PowerShell). It reports each command's exit
-   status only, never the command text, so failed commands and repeats are visible to the classifier.
-4. Asks for a folder that contains your git projects (for example `~/Developer`), lists every repository under it,
-   and after one confirmation adds a `post-commit` hook to each. The hook sends only the word "commit".
-5. Looks at what ActivityWatcher actually records. If window titles are empty or the input counts are all zero, a
-   macOS permission is missing, and it says which one.
+1. **ActivityWatch**: checks it is running, and installs and starts it if missing (Homebrew on macOS, winget on
+   Windows, a download link on Linux). Shows whether the window, AFK and input watchers are reporting.
+2. **Model (required)**: endpoint URL, model name and API key. The connection is tested for log-probabilities and
+   saved to `private.toml` (readable only by you) when it passes. Setup cannot finish without a working model.
+3. **What the model can read**: the typed-text monitor, screen text and window titles. All three start switched on;
+   turn off any you want kept on this machine.
+4. **Permissions**: what those need from the OS (on macOS, Input Monitoring and Accessibility for the app that
+   started `saip`), with a button to open the right settings pane and a key-press test.
+5. **Blocked apps**: pick, from the apps installed on this machine, the ones SAIP must never read. One list covers
+   typed text, screen text and the activity summary.
+6. **Terminal hook**: a marked block in your shell start-up file (zsh, bash or PowerShell). It reports each
+   command's exit status only, never the command text.
+7. **Git folders**: a folder that contains your projects; each repository under it gets a `post-commit` hook that
+   sends only the word "commit".
+8. **Review**: the `saip doctor` checks, then start.
+
+`saip run --no-ui` runs in the terminal only, with the setup as terminal questions (`--yes` answers yes to all).
+`--no-tray` and `--no-browser` turn those two off. A second `saip run` opens the dashboard of the one already
+running.
 
 **Commit hooks.** Git runs `.git/hooks/post-commit` after every real commit, so the agent is told the moment a
 commit happens (a branch switch or pull does not count). The hook is added at the top of an existing hook without
@@ -127,23 +139,42 @@ passed to the next offer's prompt. Every offer is appended to `offers.jsonl` in 
 numbers, the offer text and the outcome, nothing about your windows or typing. `saip run --no-dialog` prints offers
 instead (`--notify` then shows a notification), and `saip offers` summarises the record.
 
-**Dashboard and local API.** `saip run --ui` also serves a page at `http://localhost:5610/` (change with `--ui-port`):
-the stuck score over the last 30 minutes, the last gate decision in words, the offer record and the `saip doctor`
-checks. While the page is open, offers, the help text and the new-repository question appear there with the same
-buttons; with it closed they fall back to the system dialog. The page is one client of a small API (`saip/server.py`):
-`GET /api/events` streams every tick, decision, offer and outcome as server-sent events, and `POST /api/asks/<id>`
-answers an open question, so a tray popup or any other UI can use the same two calls. It listens on 127.0.0.1 only,
-refuses other hosts and cross-site POSTs, and carries scores, gate numbers and offer text: no window titles, no
-activity summary. `python -m saip.server --demo` serves the page with made-up activity, for working on a UI without
-ActivityWatcher or a model.
+**Dashboard and local API.** `saip run` serves the dashboard at `http://localhost:5610/` (change with `--ui-port`):
 
-**Tray icon and popup.** `pip install "saip[tray]"`, then `saip run --tray` (or `saip tray` beside an agent already
-running with `--ui`). The icon shows the state (in flow, possibly stuck, paused, agent not running) and its menu opens
-the dashboard or pauses offers for an hour. An offer appears as a small popup in the corner of the screen with the
-same buttons and time limit. The popup never takes the keyboard, so typing cannot answer it; whichever of the popup
-and the dashboard is answered first wins and the other closes. It is a separate process that uses only the API above.
-Written for Windows and Linux and not yet run on a real machine; on macOS, and where Python has no tkinter, the
-question falls back to the system dialog.
+- **Live**: the state in words and the app you are stuck in, the stuck score as a live chart with each stuck stretch
+  labelled by app, what pushed the score at the latest tick (each classifier feature's weight x value), time stuck
+  per app, the last gate decision and a feed of events.
+- **History**: every offer and every model check, with CSV and JSONL export.
+- **Inspector**: the exact context sent to the model at each of the last 50 checks, with the answers and the offer.
+  Kept in memory only.
+- **Settings**: the model, what it may read, blocked apps, ActivityWatch, git folders and the terminal hook, timing
+  and gate numbers, launch at login, and the health checks. Saving reloads the agent; no restart is needed.
+
+Offers, the help text and the new-repository question appear on every page with the same buttons; with no page
+open they fall back to the tray popup or the system dialog. The page is one client of a small API
+(`saip/server.py`, which lists every route): `GET /api/events` streams ticks, decisions, stuck stretches, offers
+and outcomes as server-sent events. It listens on 127.0.0.1 only, refuses other hosts, and accepts changes only as
+JSON from this machine's own pages, so a web site you visit cannot change settings or answer an offer. The API key
+is never sent back to the page. Every gate decision is appended to `decisions.jsonl` in the settings folder
+(numbers and the app name). `python -m saip.server --demo` serves the dashboard with made-up activity, and
+`--demo --fresh` starts it at the setup wizard; neither reads or changes anything.
+
+The dashboard's source is in `frontend/` (Vite, React, TypeScript, Tailwind). Its build is committed in
+`src/saip/ui/dist`, so running SAIP needs no Node. After changing the frontend: `cd frontend && npm install &&
+npm run build`. `npm run dev` serves it with hot reload against a running `saip run` or the demo on port 5610.
+
+**Tray icon.** `saip run` shows the SAIP mark in the menu bar or system tray: the plain mark in flow, with a dot when
+possibly stuck, broken when paused, faint when the agent is not running. Its menu shows the state, opens the
+dashboard, pauses offers (30 minutes, an hour, until tomorrow), switches the typed-text monitor and launch at login,
+opens settings and the health check, and quits SAIP. On Windows and Linux an offer also appears as a small popup in
+the corner of the screen that never takes the keyboard; on macOS it uses the system dialog. The tray is a separate
+process that uses only the API. Tested on macOS; the Windows and Linux paths are written to the same interface and
+covered by unit tests but have not been run on those systems since this rewrite. On GNOME the icon needs the
+AppIndicator extension.
+
+**Launch at login.** Off by default; switch it on from the tray or Settings. It adds a LaunchAgent on macOS, a
+value under the user's `Run` registry key on Windows, or an XDG autostart entry on Linux, and starts
+`saip run --no-browser`. `saip uninstall` removes it.
 
 **Context from your screen (opt-in).** thunlp gets its context from raw window titles and typed keys. SAIP's default
 only counts keys. `include_titles = true` adds window titles, the typed-text monitor (below) adds what you typed, and
@@ -176,21 +207,28 @@ On Linux, ActivityWatcher's window watcher needs an X11 session; Wayland cannot 
 `classifier/categories.py` also lists Windows and Linux app names on a best-effort basis: an unknown app counts
 as "other" and does not count as work, so extend the sets when a real export shows new names.
 
-**Typed-text monitor (opt-in, Linux and macOS).** Off by default. With `monitor_typed_content = true` and the
-optional extra installed (`pip install -e ".[typing]"`, which adds `pynput`; on macOS the app running `saip` needs
-Input Monitoring), SAIP keeps the newest `typed_text_max_chars` (200) typed characters in memory. It records only
-while an app on a short whitelist (editors, Word, browsers) is in front, never in an app on `private_apps`, and
-empties the buffer when you leave. Shortcuts are ignored, Esc clears the buffer, F1 turns it off. Nothing is written
-to disk or printed. The newest typed text is added to the behaviour summary the model sees, as thunlp/ProactiveAgent
-does with its `user_input`: it reaches the two yes/no questions, the offer and the help, whichever endpoint you
-configured (local or remote). Obvious secrets such as API keys and `password: ...` are masked first. The
-classifier score does not use it. The whitelist is per app, not per field, so a password box inside an allowed
-browser can still be read: drop the browser from the whitelist if that matters. Window titles are a separate switch
-(`include_titles = true`), and page or editor text comes from `read_screen`.
+**Typed-text monitor.** On when `monitor_typed_content = true` (the setup wizard offers it switched on; in a
+hand-written `private.toml` it is off unless you set it). On macOS the app running `saip` needs Input Monitoring; on
+Linux it needs an X11 session. SAIP keeps the newest `typed_text_max_chars` (200) typed characters in memory. It
+records in any app except those on the block list (`private_apps`), empties the buffer when you enter a blocked
+app, and records nothing when it cannot tell which app is in front. Shortcuts are ignored, Esc clears the buffer, F1
+turns it off. Nothing is written to disk or printed. The newest typed text is added to the behaviour summary the
+model sees, as thunlp/ProactiveAgent does with its `user_input`: it reaches the two yes/no questions, the offer and
+the help, at whichever endpoint you configured (local or remote). Obvious secrets such as API keys and
+`password: ...` are masked first. The classifier score does not use it. The block list works per app, not per
+field: macOS hides keys from listeners while a password field has focus, but elsewhere a password typed into an app
+that is not blocked can enter the buffer, so block browsers too if that matters. Window titles are a separate
+switch (`include_titles = true`), and page or editor text comes from `read_screen`.
 
-**Privacy.** Unless you turn on the typed-text monitor, keys are counted, never recorded. The terminal hook sends an exit code and a hash, not the command.
+**The block list.** `private_apps` is one list for the typing monitor, screen text and the activity summary
+(`llm/privacy.py`). Names are matched as whole words, ignoring case and `.exe`/`.app`, in both directions, so
+"Chrome" blocks "Google Chrome" and "Mail" does not block "Gmail". Settings lists the apps installed on the machine
+(macOS bundles, Linux `.desktop` files, Windows Start Menu and registry) together with the names ActivityWatch has
+actually recorded.
+
+**Privacy.** With the typed-text monitor off, keys are counted, never recorded. The terminal hook sends an exit code and a hash, not the command.
 What the model sees is a short summary of app names, dwell times and counts; window titles stay out unless
-`include_titles = true`, typed text only with the monitor on (see above), and apps on `private_apps` are never named. Everything is sent only to the endpoint you
+`include_titles = true`, typed text only with the monitor on (see above), and apps on `private_apps` are never named or read. Everything is sent only to the endpoint you
 configure.
 
 ## The LLM layer (Phase 3)

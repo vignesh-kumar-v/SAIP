@@ -6,6 +6,7 @@ import plistlib
 import stat
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -19,6 +20,8 @@ from saip.events import Bus
 from saip.platform import apps
 from saip.runtime import Episodes
 from test_app import FakeAW, FakePlatform, sandbox  # noqa: F401  (the fixture)
+
+_real_time, _sleep = time.time, time.sleep
 
 
 # ---------------------------------------------------------------------------------------------------- private.toml
@@ -294,3 +297,34 @@ def test_the_mark_is_drawn_for_every_state():
                                                                              icons.OFFLINE)}
         assert len(set(imgs.values())) == 4
     assert icons.svg(icons.STUCK).startswith("<svg") and "<circle" in icons.svg(icons.STUCK)
+
+
+# ---------------------------------------------------------------------------------------------------- the agent
+def test_the_agent_publishes_ticks_with_the_app_and_logs_each_decision(sandbox, monkeypatch):
+    import time as _time
+
+    from saip import offers, runtime
+    from test_app import NOW, healthy_aw
+    monkeypatch.setattr(offers, "user_config_dir", lambda: sandbox / "cfg")
+    monkeypatch.setattr(runtime, "user_config_dir", lambda: sandbox / "cfg")
+    monkeypatch.setattr(_time, "time", lambda: NOW)
+    (sandbox / "private.toml").write_text('[llm]\nprivate_apps = ["Signal"]\n[agent]\ntick_s = 0.05\nassess_interval_s = 0\n')
+    bus = Bus()
+    rt = runtime.Runtime(bus, FakePlatform(None), healthy_aw(),
+                         runtime.RunOptions(mock_llm=True, trigger=0.0, no_dialog=True))
+    rt.start()
+    try:
+        deadline = _real_time() + 10
+        while _real_time() < deadline and not (bus.snapshot()["ticks"] and rt.inspector):
+            _sleep(0.05)
+    finally:
+        rt.stop()
+    snap = bus.snapshot()
+    tick = snap["ticks"][-1]
+    assert tick["app"] and "circling" in tick["features"]["items"] and tick["trigger"] == 0.0
+    decisions = [e for e in snap["log"] if e["kind"] == "decision"]
+    assert decisions and decisions[0]["app"] == tick["app"]
+    assert offers.read_decisions()[0]["decision"] == decisions[0]["decision"]
+    entry = rt.inspector[0]
+    assert entry["context"].startswith("Activity over the last") and not rt.running
+    assert any(e["kind"] == "app" for e in snap["log"])

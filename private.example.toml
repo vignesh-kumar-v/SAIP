@@ -31,5 +31,5 @@ watch_roots = []              # folders searched for git repositories, e.g. ["~/
 # cooldown_s = 300            # quiet period after an offer
 # pending_expiry_s = 600      # a deferred offer is dropped after this long
 # break_idle_s = 5            # no input for this long counts as a natural break
-monitor_typed_content = false # opt-in typed-text monitor (Linux + macOS); needs: pip install -e ".[typing]"
+monitor_typed_content = false # typed-text monitor: records in every app except those on private_apps
 typed_text_max_chars = 200    # how much of the newest typed text the monitor hands out
