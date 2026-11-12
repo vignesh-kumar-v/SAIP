@@ -2,6 +2,9 @@
 
   saip run        start SAIP: the agent, its dashboard (opened in your browser) and the tray icon.
                   The first run walks you through setup in the browser.
+  saip start      the same, in the background: no terminal has to stay open
+  saip stop       stop a SAIP started either way
+  saip status     is it running, and what is it doing
   saip setup      the setup in the terminal (safe to repeat)
   saip doctor     check every moving part and say what is wrong
   saip repo       add / list / remove the folders whose git repositories get the commit hook
@@ -211,6 +214,89 @@ def cmd_run(a) -> int:
     return 0
 
 
+def log_file() -> Path:
+    from llm.config import user_config_dir
+    return user_config_dir() / "saip.log"
+
+
+def cmd_start(a) -> int:
+    """saip start: run SAIP detached from this terminal, with its output in a log file."""
+    port = a.ui_port
+    if server_mod.running_here(port):
+        print(f"SAIP is already running: http://localhost:{port}/")
+        return 0
+    from llm.config import find_config
+    cmd = [sys.executable, "-m", "saip", "--url", a.url, "run", "--ui-port", str(port)]
+    config = find_config(a.config)
+    if config:                                   # by path: the background process may not start in this folder
+        cmd += ["--config", str(Path(config).resolve())]
+    for flag in ("no_browser", "no_tray", "mock_llm"):
+        if getattr(a, flag):
+            cmd.append("--" + flag.replace("_", "-"))
+    log = log_file()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    out = open(log, "a", encoding="utf-8")
+    out.write(f"\n--- saip start, {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+    out.flush()
+    detach = ({"creationflags": 0x00000008 | 0x00000200} if sys.platform.startswith("win")      # detached, own group
+              else {"start_new_session": True})
+    env = {**__import__("os").environ, "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, **detach)
+    if not _wait(lambda: server_mod.running_here(port) is not None or proc.poll() is not None, 15):
+        print(f"SAIP did not answer on port {port} within 15 seconds. See {log}")
+        return 1
+    if proc.poll() is not None and not server_mod.running_here(port):
+        print(f"SAIP stopped right away (exit code {proc.returncode}). See {log}")
+        return 1
+    print(f"SAIP is running in the background: http://localhost:{port}/\n"
+          f"Stop it with `saip stop` or from the tray menu. Its output is in {log}")
+    return 0
+
+
+def cmd_stop(a) -> int:
+    """saip stop: ask a running SAIP to shut down (agent, dashboard and tray)."""
+    import json
+    import urllib.request
+    port = a.ui_port
+    if not server_mod.running_here(port):
+        print("SAIP is not running.")
+        return 0
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/shutdown", b"{}", {"Content-Type": "application/json"})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5) as r:
+            json.loads(r.read())
+    except Exception as e:
+        print(f"SAIP did not accept the stop request ({e}).")
+        return 1
+    if _wait(lambda: server_mod.running_here(port, timeout=0.5) is None, 15):
+        print("SAIP has stopped.")
+        return 0
+    print("SAIP is still shutting down; check again with `saip status`.")
+    return 1
+
+
+def cmd_status(a) -> int:
+    """saip status: exit code 0 when running, 3 when not."""
+    info = server_mod.running_here(a.ui_port)
+    if not info:
+        print("SAIP is not running. Start it with `saip start` (background) or `saip run`.")
+        return 3
+    rt = info.get("runtime") or {}
+    if not info.get("ready"):
+        state = "waiting for setup to be finished in the browser"
+    elif rt.get("error"):
+        state = f"the agent stopped: {rt['error']}"
+    elif rt.get("running"):
+        state = {"llm": f"watching, model {rt.get('model')}", "mock": "watching, mock model",
+                 "score-only": "scoring only (no model configured)"}.get(rt.get("mode"), "watching")
+    else:
+        state = "dashboard up, agent not running"
+    print(f"SAIP is running: http://localhost:{a.ui_port}/\n  {state}")
+    if info.get("quiet_until", 0) > time.time():
+        print(time.strftime("  offers paused until %H:%M", time.localtime(info["quiet_until"])))
+    return 0
+
+
 def _wait(check, seconds: float) -> bool:
     end = time.time() + seconds
     while time.time() < end:
@@ -263,6 +349,17 @@ def main(argv=None) -> int:
     r.add_argument("--tray", action="store_true", help=argparse.SUPPRESS)     # so is the tray
     r.add_argument("--ui-port", type=int, default=server_mod.DEFAULT_PORT, help=f"dashboard port (default {server_mod.DEFAULT_PORT})")
     r.set_defaults(fn=cmd_run)
+    st = sub.add_parser("start", help="start SAIP in the background (no terminal has to stay open)")
+    st.add_argument("--config", help="path to private.toml")
+    st.add_argument("--no-browser", action="store_true", help="do not open the dashboard in the browser")
+    st.add_argument("--no-tray", action="store_true", help="no tray icon")
+    st.add_argument("--mock-llm", action="store_true", help="testing: use a deterministic stand-in for the model")
+    st.add_argument("--ui-port", type=int, default=server_mod.DEFAULT_PORT, help="dashboard port")
+    st.set_defaults(fn=cmd_start)
+    for name, fn, text in (("stop", cmd_stop, "stop a running SAIP"), ("status", cmd_status, "say whether SAIP is running")):
+        x = sub.add_parser(name, help=text)
+        x.add_argument("--ui-port", type=int, default=server_mod.DEFAULT_PORT, help="dashboard port")
+        x.set_defaults(fn=fn)
     s = sub.add_parser("setup", help="set everything up (safe to repeat)")
     s.add_argument("--yes", action="store_true")
     s.add_argument("--root", action="append", help="folder whose git repositories get the commit hook (repeatable)")

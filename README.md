@@ -81,6 +81,9 @@ One command starts everything:
 ```bash
 pip install -e .
 saip run              # the agent, its dashboard (opens in your browser) and the tray icon. Ctrl-C to stop.
+saip start            # the same in the background: close the terminal, SAIP keeps running
+saip stop             # stop it (also in the tray menu and Settings)
+saip status           # is it running, and what is it doing
 saip doctor           # check every moving part
 saip offers           # what happened to past offers: accepted, dismissed, ignored
 saip setup            # the same setup as questions in the terminal (safe to repeat)
@@ -108,7 +111,8 @@ Nothing on your machine changes until you press the button for it, and the agent
 8. **Review**: the `saip doctor` checks, then start.
 
 `saip run --no-ui` runs in the terminal only, with the setup as terminal questions (`--yes` answers yes to all).
-`--no-tray` and `--no-browser` turn those two off. A second `saip run` opens the dashboard of the one already
+`--no-tray` and `--no-browser` turn those two off. `saip start` runs the same thing detached from the terminal and
+writes its output to `saip.log` in the settings folder. A second `saip run` opens the dashboard of the one already
 running.
 
 **Commit hooks.** Git runs `.git/hooks/post-commit` after every real commit, so the agent is told the moment a

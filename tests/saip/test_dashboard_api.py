@@ -497,3 +497,16 @@ def test_every_offer_sends_a_notification_unless_switched_off(sandbox, monkeypat
     on, off = run("true"), run("false")
     assert on and on[0][0] == "SAIP" and on[0][1]
     assert off == []
+
+
+def test_status_and_stop_talk_to_a_running_saip(api_server, capsys):
+    import argparse
+
+    from saip import cli
+    base, _, stopped = api_server
+    port = int(base.rsplit(":", 1)[1])
+    assert cli.cmd_status(argparse.Namespace(ui_port=port)) == 0 and "SAIP is running" in capsys.readouterr().out
+    assert cli.cmd_status(argparse.Namespace(ui_port=1)) == 3
+    assert cli.cmd_stop(argparse.Namespace(ui_port=1)) == 0 and "not running" in capsys.readouterr().out
+    cli.cmd_stop(argparse.Namespace(ui_port=port))               # the fixture's server stays up; the request must arrive
+    assert stopped.wait(2)
