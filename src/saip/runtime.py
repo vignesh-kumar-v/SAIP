@@ -105,6 +105,7 @@ class Runtime:
         self.last_context = ""                # the newest activity summary, as the model saw it
         self.last_screen = None               # and the newest screen text
         self.look = lambda: None
+        self.snapshot_context = lambda: ""    # a fresh summary of the last few minutes, built on demand
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -214,6 +215,17 @@ class Runtime:
             return screen
 
         self.look = look
+
+        def snapshot_context() -> str:
+            """The activity summary as of now, for a conversation started when no offer was being written."""
+            now = time.time()
+            try:
+                trace = fetch_trace(aw, now, cfg.history_min * 60)
+            except (NotReady, AWError):
+                return ""
+            typed = typed_for_model(monitor.get_current_text() if monitor is not None and monitor.running else None)
+            return build_context(trace, now, llm.lookback_s, llm.include_titles, blocked, typed_text=typed)
+        self.snapshot_context = snapshot_context
 
         def help_out(offer):
             screen = look() or seen.get("screen")

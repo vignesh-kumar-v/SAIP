@@ -412,8 +412,10 @@ def test_conversations_start_after_help_and_the_model_answers(sandbox):
             seen["messages"] = messages
             return [Choice("Try naming the one thing you expected.", finish_reason="stop")]
 
+    fresh = {"text": "Activity: 3 switches, just now."}
     rt = type("RT", (), {"chats": Chats(), "client": Model(), "last_context": "Activity: 14 switches.",
-                         "look": staticmethod(lambda: None)})()
+                         "look": staticmethod(lambda: None),
+                         "snapshot_context": staticmethod(lambda: fresh["text"])})()
     api = server.Api(Bus(), plat=FakePlatform(None), aw=FakeAW(up=False), runtime=rt)
     cid = rt.chats.create("Talk it through", "Activity: 14 switches.", {"app": "TextEdit", "text": "a draft▌"}, first="Here is a start.")
     assert [m["role"] for m in api.chat_get(cid)["messages"]] == ["assistant"]
@@ -425,6 +427,12 @@ def test_conversations_start_after_help_and_the_model_answers(sandbox):
     assert "context" not in out and out["has_screen"] is True
     assert api.chats()["chats"][0]["id"] == cid and api.chats()["available"] is True
     assert api.chat_new("Another")["messages"] == []
+    live = api.chat_new("From the page")["id"]
+    assert rt.chats.get(live)["context"] == "Activity: 3 switches, just now."
+    fresh["text"] = "Activity: 9 switches, a minute later."
+    api.chat_send(live, "what was I doing?")
+    assert "9 switches, a minute later" in seen["messages"][1]["content"]
+    assert "14 switches" in rt.chats.get(cid)["context"]                # an offer's chat keeps what the offer saw
     for bad in (lambda: api.chat_send(999, "hi"), lambda: api.chat_send(cid, "  ")):
         with pytest.raises(server.ApiError):
             bad()

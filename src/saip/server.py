@@ -204,7 +204,7 @@ class Api:
             screen = {"app": found.app, "text": found.text} if found is not None else None
         except Exception:
             screen = None
-        cid = rt.chats.create(title or "New chat", rt.last_context, screen)
+        cid = rt.chats.create(title or "New chat", rt.snapshot_context() or rt.last_context, screen, live=True)
         return self.chat_get(cid)
 
     def chat_send(self, cid: int, message: str) -> dict:
@@ -219,6 +219,11 @@ class Api:
             raise ApiError(400, "write a message first")
         if getattr(rt, "client", None) is None:
             raise ApiError(409, "no model is connected: the agent is stopped or has no endpoint")
+        if c.get("live"):                                       # a chat started from the page: keep its summary current
+            fresh = rt.snapshot_context()
+            if fresh:
+                chats.set_context(cid, fresh)
+                c = chats.get(cid)
         chats.add(cid, "user", text)
         try:
             reply = chat_reply(rt.client, c["context"], c["screen"], chats.get(cid)["messages"])

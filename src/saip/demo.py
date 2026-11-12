@@ -25,6 +25,7 @@ class _DemoRuntime:
         self.client = object()
         self.last_context = "Activity over the last 5 minutes: 14 app switches between Code and Google Chrome."
         self.look = lambda: None
+        self.snapshot_context = lambda: self.last_context
         self.inspector: deque = deque(maxlen=50)
         self.opts = None
         self.started_at = time.time()
