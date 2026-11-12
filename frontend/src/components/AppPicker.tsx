@@ -71,7 +71,7 @@ export function AppPicker({ data, selected, onChange }: { data: AppsPayload; sel
                   <span className="block truncate text-[13.5px] text-ink">{r.label}</span>
                   <span className="block truncate text-[11.5px] text-faint">
                     {r.label !== r.value ? `${r.value} · ` : ""}
-                    {r.seen ? "used lately" : r.installed ? "installed" : "on your list"}
+                    {r.seen ? "used lately" : r.installed ? "installed" : "on your list, not installed"}
                   </span>
                 </span>
               </button>

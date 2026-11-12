@@ -101,7 +101,7 @@ function Privacy({ reload }: { reload: () => void }) {
     <Section
       id="privacy"
       title="Blocked apps"
-      lead="One list for the typed-text monitor, screen text and the activity summary. Listed from the apps installed here and the ones ActivityWatch has seen."
+      lead="One list for the typed-text monitor, screen text and the activity summary. Listed from the apps installed on this machine."
       right={
         <div className="flex items-center gap-3">
           <SavedFlash show={flash} />

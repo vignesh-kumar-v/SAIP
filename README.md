@@ -223,8 +223,8 @@ switch (`include_titles = true`), and page or editor text comes from `read_scree
 **The block list.** `private_apps` is one list for the typing monitor, screen text and the activity summary
 (`llm/privacy.py`). Names are matched as whole words, ignoring case and `.exe`/`.app`, in both directions, so
 "Chrome" blocks "Google Chrome" and "Mail" does not block "Gmail". Settings lists the apps installed on the machine
-(macOS bundles, Linux `.desktop` files, Windows Start Menu and registry) together with the names ActivityWatch has
-actually recorded.
+(macOS bundles, Linux `.desktop` files, Windows Start Menu and registry), marking the ones you used lately. Names
+already on your list that match no installed app stay visible so you can remove them.
 
 **Privacy.** With the typed-text monitor off, keys are counted, never recorded. The terminal hook sends an exit code and a hash, not the command.
 What the model sees is a short summary of app names, dwell times and counts; window titles stay out unless

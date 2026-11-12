@@ -10,7 +10,7 @@ Reading
     GET  /api/inspector        the last model checks: the exact context sent, the answers, the offer (memory only)
     GET  /api/health           what `saip doctor` checks, as rows
     GET  /api/settings         private.toml as the page may see it (the API key only as set / not set)
-    GET  /api/apps             installed apps plus the ones ActivityWatch has seen, with the block list
+    GET  /api/apps             installed apps (marked if ActivityWatch has seen them), with the block list
     GET  /api/setup/status | /api/setup/aw | /api/setup/permissions | /api/setup/hook | /api/repos | /api/autostart
 
 Changing
@@ -207,7 +207,7 @@ class Api:
         from llm.privacy import GROUPS, SUGGESTED_GROUPS, group_of, is_blocked
         from .platform.apps import merge
         blocked = list(load_settings().llm.private_apps)
-        rows = merge(self.plat.installed_apps(), self.seen_apps())
+        rows = merge(self.plat.installed_apps(), self.seen_apps(), installed_only=True)
         listed = {r["value"] for r in rows}
         rows += [{"label": b, "value": b, "installed": False, "seen": False} for b in blocked if b not in listed
                  and not any(is_blocked(r["value"], [b]) for r in rows)]

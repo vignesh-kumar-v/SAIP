@@ -95,6 +95,11 @@ def test_windows_start_menu_and_registry(tmp_path):
     assert not any("Uninstall" in r["label"] for r in rows)
 
 
+def test_the_picker_lists_installed_apps_only():
+    rows = apps.merge([{"label": "Visual Studio Code", "value": "Code"}], ["Code", "loginwindow"], installed_only=True)
+    assert rows == [{"label": "Visual Studio Code", "value": "Code", "installed": True, "seen": True}]
+
+
 def test_installed_and_seen_apps_merge_by_name():
     rows = apps.merge([{"label": "Visual Studio Code", "value": "Code"}], ["Code", "loginwindow"])
     assert rows == [{"label": "loginwindow", "value": "loginwindow", "installed": False, "seen": True},

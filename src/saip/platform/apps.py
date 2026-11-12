@@ -224,8 +224,12 @@ def front_windows() -> str | None:
 
 
 # ---------------------------------------------------------------------------------------------------- merging
-def merge(installed: list[dict], seen: list[str]) -> list[dict]:
-    """Installed apps plus names ActivityWatch has recorded, one row per name, sorted by label."""
+def merge(installed: list[dict], seen: list[str], installed_only: bool = False) -> list[dict]:
+    """Installed apps plus names ActivityWatch has recorded, one row per name, sorted by label.
+
+    With installed_only, a recorded name that matches no installed app (loginwindow, helper processes) is left out;
+    the ones that do match are still marked as seen.
+    """
     from llm.privacy import norm
     rows: dict[str, dict] = {}
     for r in installed:
@@ -239,6 +243,6 @@ def merge(installed: list[dict], seen: list[str]) -> list[dict]:
         hit = rows.get(k) or next((r for r in rows.values() if norm(r["label"]) == k), None)
         if hit:
             hit["seen"] = True
-        else:
+        elif not installed_only:
             rows[k] = {"label": name, "value": name, "installed": False, "seen": True}
     return sorted(rows.values(), key=lambda r: r["label"].lower())
