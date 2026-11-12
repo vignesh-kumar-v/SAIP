@@ -7,7 +7,7 @@ it for the browser and `render()` draws it with Pillow for the tray.
 States change the mark, not just its colour, so they can be told apart without colour:
 
     flow      the mark
-    stuck     the loop filled in: caught in it
+    stuck     the mark with a dot by its top right corner, like a badge
     paused    the line broken after the loop
     offline   the mark drawn thin and faint
 
@@ -31,6 +31,7 @@ SEGMENTS = (
     ((12.0, 4.6), (9.6, 4.6), (7.9, 7.8), (9.2, 12.0)),
     ((9.2, 12.0), (10.6, 16.7), (15.5, 19.3), (21.5, 19.3)),
 )
+BADGE = (20.2, 5.2, 2.6)         # stuck: centre x, centre y, radius
 GAP = (0.52, 0.80)               # paused: the part of the last segment left out (as a fraction of it)
 
 
@@ -38,25 +39,6 @@ def _bez(p0, p1, p2, p3, t):
     u = 1 - t
     return (u ** 3 * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t ** 3 * p3[0],
             u ** 3 * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t ** 3 * p3[1])
-
-
-def _crossing(steps: int = 400) -> tuple[float, float]:
-    """Where the line crosses itself: (t on the first segment, t on the last)."""
-    a = [_bez(*SEGMENTS[0], k / steps) for k in range(steps + 1)]
-    b = [_bez(*SEGMENTS[-1], k / steps) for k in range(steps + 1)]
-    best = min(((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2, i, j) for i, p in enumerate(a) for j, q in enumerate(b)
-               if i > steps // 4 and j < 3 * steps // 4)
-    return best[1] / steps, best[2] / steps
-
-
-def loop_outline(steps: int = 48) -> list[tuple[float, float]]:
-    """The inside of the loop as a closed polygon in grid units (filled for the stuck state)."""
-    t1, t4 = _crossing()
-    pts = [_bez(*SEGMENTS[0], t1 + (1 - t1) * k / steps) for k in range(steps + 1)]
-    for seg in SEGMENTS[1:3]:
-        pts += [_bez(*seg, k / steps) for k in range(1, steps + 1)]
-    pts += [_bez(*SEGMENTS[-1], t4 * k / steps) for k in range(1, steps + 1)]
-    return pts
 
 
 def _runs(state: str, steps: int = 48) -> list[list[tuple[float, float]]]:
@@ -88,8 +70,7 @@ def svg(state: str = FLOW, colour: str = "currentColor", size: int | None = None
     width = STROKE * (0.6 if state == OFFLINE else 1)
     opacity = ' opacity="0.55"' if state == OFFLINE else ""
     dims = f' width="{size}" height="{size}"' if size else ""
-    dot = ('<path d="M' + " L".join(f"{x:.2f} {y:.2f}" for x, y in loop_outline(24)) + f'Z" fill="{colour}"/>'
-           if state == STUCK else "")
+    dot = f'<circle cx="{BADGE[0]}" cy="{BADGE[1]}" r="{BADGE[2]}" fill="{colour}"/>' if state == STUCK else ""
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"{dims}>'
             f'<path d="{d.strip()}" fill="none" stroke="{colour}" stroke-width="{width}" stroke-linecap="round" '
             f'stroke-linejoin="round"{opacity}/>{dot}</svg>')
@@ -115,7 +96,8 @@ def _draw_mark(img, state: str, ink, box: tuple[float, float, float], scale: flo
                 x, y = x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n
                 d.ellipse((x - r, y - r, x + r, y + r), fill=ink)
     if state == STUCK:
-        d.polygon([(left + x * k, top + y * k) for x, y in loop_outline()], fill=ink)
+        cx, cy, rr = left + BADGE[0] * k, top + BADGE[1] * k, BADGE[2] * k
+        d.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=ink)
 
 
 def render(state: str = FLOW, size: int = 64, template: bool = False):

@@ -293,4 +293,4 @@ def test_the_mark_is_drawn_for_every_state():
         imgs = {s: icons.render(s, 32, template=template).tobytes() for s in (icons.FLOW, icons.STUCK, icons.PAUSED,
                                                                              icons.OFFLINE)}
         assert len(set(imgs.values())) == 4
-    assert icons.svg(icons.STUCK).startswith("<svg") and "Z" in icons.svg(icons.STUCK)
+    assert icons.svg(icons.STUCK).startswith("<svg") and "<circle" in icons.svg(icons.STUCK)
