@@ -2,6 +2,7 @@ import { ArrowUp, MessageSquarePlus } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { ActionCard, ConfirmRewind, ToolLine, UserBubble, itemsOf, toolsSummary } from "../components/ChatParts";
+import { Markdown } from "../components/Markdown";
 import { Button, Card, Empty, Mark, Spinner, cx } from "../components/ui";
 import { ApiError, get, post } from "../lib/api";
 import { ago } from "../lib/format";
@@ -221,7 +222,7 @@ export function Chat() {
                       />
                     ) : it.kind === "assistant" ? (
                       <div className="flex justify-start">
-                        <div className="max-w-[min(640px,88%)] rounded-2xl border border-line bg-raised px-4 py-2.5 text-[14.5px] leading-relaxed whitespace-pre-wrap text-ink">{it.text}</div>
+                        <div className="max-w-[min(720px,92%)] min-w-0 rounded-2xl border border-line bg-raised px-4 py-2.5 text-[14.5px] leading-relaxed text-ink"><Markdown text={it.text} /></div>
                       </div>
                     ) : it.kind === "tool" ? (
                       <ToolLine item={it} />

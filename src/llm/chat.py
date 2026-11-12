@@ -9,12 +9,13 @@ from __future__ import annotations
 import json
 
 from .client import ChatClient, ToolsUnsupported
-from .text import complete_text
+from .text import complete_text, tidy
 
 SYSTEM = """You are SAIP's assistant, talking with someone who may be stuck on their work.
 You are given background first: a summary of their recent activity and, when available, the text near their cursor.
-Then you talk with them. Be concrete, calm and brief (under 120 words unless they ask for more), plain sentences,
-light formatting only. Use the background, but do not recite it. If you need to see something, ask one question.
+Then you talk with them. Be concrete, calm and brief (under 120 words unless they ask for more or for code).
+Markdown is fine: short lists, **bold**, `code`, and fenced code blocks (with the language after the opening
+fence) for any code or command. Use the background, but do not recite it. If you need to see something, ask one question.
 
 About the text near the cursor:
 - It is an excerpt. "[…]" marks where SAIP cut it, which is not where the person stopped, so never call the text
@@ -98,19 +99,20 @@ def chat_turn(client: ChatClient, messages: list[dict], tools: list[dict], run_t
             events.append({"name": c["name"], "arguments": c["arguments"], "label": out.get("label", c["name"]),
                            "ok": out["kind"] == "read"})
         if pending:
-            return {"text": " ".join((reply["content"] or "").split()), "events": events, "pending": pending,
+            return {"text": tidy(reply["content"] or ""), "events": events, "pending": pending,
                     "messages": messages, "tools_unsupported": unsupported}
     else:
         reply, off = _ask(client, messages, None, max_tokens)
         unsupported = unsupported or off
-    text = " ".join((reply["content"] or "").split())
+    text = tidy(reply["content"] or "")
     if text:
         messages.append({"role": "assistant", "content": text})
     return {"text": text, "events": events, "pending": None, "messages": messages, "tools_unsupported": unsupported}
 
 
 def chat_reply(client: ChatClient, context: str, screen, history: list[dict], max_tokens: int = 420) -> str:
-    return complete_text(client, chat_messages(context, screen, history), max_tokens=max_tokens, temperature=0.4)
+    return complete_text(client, chat_messages(context, screen, history), max_tokens=max_tokens, temperature=0.4,
+                         keep_lines=True)
 
 
 __all__ = ["chat_reply", "chat_messages", "background", "base_messages", "chat_turn", "tool_result_message",

@@ -276,7 +276,7 @@ def test_a_read_tool_then_an_answer():
     client = Scripted(reply("", call(1, "read_file", path="a.py")), reply("It  prints\nhello."))
     run = runner({"read_file": {"kind": "read", "result": "print('hello')", "label": "Read a.py"}})
     out = chat_turn(client, [{"role": "user", "content": "what does a.py do"}], TOOLS, run)
-    assert out["text"] == "It prints hello." and out["pending"] is None and out["tools_unsupported"] is False
+    assert out["text"] == "It  prints\nhello." and out["pending"] is None and out["tools_unsupported"] is False
     assert out["events"] == [{"name": "read_file", "arguments": {"path": "a.py"}, "label": "Read a.py", "ok": True}]
     asst, tool, final = out["messages"][1:]
     assert asst["tool_calls"][0]["function"] == {"name": "read_file", "arguments": '{"path": "a.py"}'}
@@ -376,3 +376,9 @@ def test_public_settings_hide_the_search_key():
     assert pub["llm"]["api_key_set"] is True and "api_key" not in pub["llm"]
     assert "tvly-secret" not in json.dumps(pub) and "sk-main" not in json.dumps(pub)
     assert config_file.public_settings(Settings())["llm"]["search_api_key_set"] is False
+
+
+def test_chat_replies_keep_their_line_breaks_so_code_and_lists_survive():
+    from llm.text import tidy
+    raw = "Here is a script:  \n\n\n\n```python\nimport time\n\n\nprint(1)  \n```\n\n- one\n- two\n"
+    assert tidy(raw) == "Here is a script:\n\n```python\nimport time\n\nprint(1)\n```\n\n- one\n- two"
