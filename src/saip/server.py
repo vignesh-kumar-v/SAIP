@@ -18,6 +18,7 @@ Reading
 
 Changing
     POST /api/asks/<id>        {"button": "Help me"} answers an open question
+    POST /api/chats/clear      forgets every conversation (and empties chats.jsonl when they are being kept)
     POST /api/chats            {"title"?} starts a conversation; POST /api/chats/<id> {"message"} sends one and returns the reply
     POST /api/chats/<id>/actions/<item> {"approve": true|false} decides a proposed action; the model then carries on
     POST /api/chats/<id>/rewind {"item", "message"?} goes back to one of your messages (undoing files), optionally
@@ -192,7 +193,12 @@ class Api:
 
     def chats(self) -> dict:
         rt = self.runtime
-        return {"chats": self._chats().listing(), "available": bool(rt and getattr(rt, "client", None))}
+        chats = self._chats()
+        return {"chats": chats.listing(), "available": bool(rt and getattr(rt, "client", None)),
+                "keeping": chats.path is not None, "path": str(chats.path) if chats.path else None}
+
+    def chats_clear(self) -> dict:
+        return {"ok": True, "removed": self._chats().clear()}
 
     def _tool_names(self) -> list[str]:
         if getattr(self.runtime, "client", None) is None:
@@ -453,9 +459,12 @@ class Api:
         from . import setup
         from .config_file import SettingError, write_settings
         try:
-            changed = write_settings(setup.ensure_config(), body)
+            changed = write_settings(setup.ensure_config(explicit=getattr(getattr(self.runtime, "opts", None), "config", None)), body)
         except SettingError as e:
             raise ApiError(400, str(e)) from None
+        if self.runtime is not None and hasattr(self.runtime, "sync_chats"):
+            from llm.config import load_settings
+            self.runtime.sync_chats(load_settings(getattr(getattr(self.runtime, "opts", None), "config", None)))
         self.reload()
         return {"ok": True, "changed": changed, "settings": self.settings()}
 
@@ -731,6 +740,9 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 self._json({"ok": ok} if ok else {"ok": False, "error": "that question is no longer open"}, 200 if ok else 409)
                 return
             b = body if isinstance(body, dict) else {}
+            if parts == ["api", "chats", "clear"]:
+                self._reply(api.chats_clear)
+                return
             if parts[:2] == ["api", "chats"] and len(parts) > 2:
                 self._chat_post(parts, b)
                 return

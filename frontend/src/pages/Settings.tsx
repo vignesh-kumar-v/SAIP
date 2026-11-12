@@ -14,6 +14,7 @@ const SECTIONS = [
   ["features", "What it reads"],
   ["chat", "Chat tools"],
   ["privacy", "Blocked apps"],
+  ["chats", "Saved chats"],
   ["notifications", "Notifications"],
   ["activitywatch", "ActivityWatch"],
   ["repos", "Git & terminal"],
@@ -286,6 +287,58 @@ function Behaviour({ s, reload }: { s: SettingsT; reload: () => void }) {
   );
 }
 
+function SavedChats({ s, reload }: { s: SettingsT; reload: () => void }) {
+  const list = useJson<{ chats: { id: number }[]; keeping: boolean; path: string | null }>("/api/chats");
+  const [busy, setBusy] = useState(false);
+  const [sure, setSure] = useState(false);
+  const [flash, show] = useFlash();
+  const on = !!s.agent.keep_chats;
+  const count = list.data?.chats.length ?? 0;
+  const set = async (v: boolean) => {
+    setBusy(true);
+    await post("/api/settings", { agent: { keep_chats: v } }).catch(() => {});
+    setBusy(false);
+    show();
+    reload();
+    list.reload();
+  };
+  const wipe = async () => {
+    setBusy(true);
+    await post("/api/chats/clear").catch(() => {});
+    setBusy(false);
+    setSure(false);
+    list.reload();
+  };
+  return (
+    <Section id="chats" title="Saved chats" lead="Chats are kept in memory and disappear when SAIP stops, unless you keep them." right={<SavedFlash show={flash} />}>
+      <div className="flex items-center gap-4 rounded-xl border border-line px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px] text-ink">Keep chats between runs</div>
+          <div className="text-[12px] leading-relaxed text-faint">
+            Saves them to <span className="num">chats.jsonl</span> in the settings folder, readable only by you. Chats can hold your screen text, typed text and file contents. Turning this off deletes the file.
+          </div>
+        </div>
+        <Toggle checked={on} disabled={busy} onChange={set} label="Keep chats between runs" />
+      </div>
+      <div className="mt-3 flex items-center gap-4 rounded-xl border border-line px-4 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[14px] text-ink">{count} {count === 1 ? "chat" : "chats"} {on ? "saved" : "this run"}</div>
+          {list.data?.path && <div className="num truncate text-[12px] text-faint">{list.data.path}</div>}
+        </div>
+        {sure ? (
+          <div className="flex items-center gap-2">
+            <span className="text-[12.5px] text-muted">Delete all {count}?</span>
+            <Button size="sm" variant="danger" busy={busy} onClick={wipe}>Yes, delete</Button>
+            <Button size="sm" variant="ghost" onClick={() => setSure(false)}>Cancel</Button>
+          </div>
+        ) : (
+          <Button size="sm" variant="danger" disabled={count === 0 || busy} onClick={() => setSure(true)}>Delete all chats</Button>
+        )}
+      </div>
+    </Section>
+  );
+}
+
 function Notifications({ s, reload }: { s: SettingsT; reload: () => void }) {
   const [busy, setBusy] = useState(false);
   const [flash, show] = useFlash();
@@ -431,6 +484,7 @@ export function Settings() {
             <Features s={s} reload={refresh} />
             <ChatTools s={s} reload={refresh} />
             <Privacy reload={refresh} />
+            <SavedChats s={s} reload={refresh} />
             <Notifications s={s} reload={refresh} />
             <Section id="activitywatch" title="ActivityWatch" lead="Where SAIP's activity data comes from.">
               <ActivityWatchPanel />

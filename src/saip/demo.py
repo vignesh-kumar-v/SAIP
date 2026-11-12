@@ -62,7 +62,7 @@ class DemoApi(Api):
                     "agent": {"tick_s": 5.0, "history_min": 90.0, "assess_interval_s": 30.0, "cooldown_s": 300.0,
                               "offer_timeout_s": 45.0, "pending_expiry_s": 600.0, "break_idle_s": 5.0, "repos": [],
                               "watch_roots": [] if fresh else ["~/Developer"], "exclude": [], "rescan_s": 300.0,
-                              "new_repos": "ask", "monitor_typed_content": True, "typed_text_max_chars": 200, "notify_offers": True},
+                              "new_repos": "ask", "monitor_typed_content": True, "typed_text_max_chars": 200, "notify_offers": True, "keep_chats": False},
                     "path": "(demo: nothing is written)"}
         self.hook = False
         self.roots = list(self.cfg["agent"]["watch_roots"])

@@ -374,7 +374,7 @@ def plan_uninstall(plat: Platform, aw: ActivityWatch, *, keep_config: bool = Fal
     cal = user_config_dir() / "calibration.json"
     if cal.exists() and not keep_config:
         to_delete.append(cal)
-    for name in ("offers.jsonl", "decisions.jsonl", "saip.log"):
+    for name in ("offers.jsonl", "decisions.jsonl", "chats.jsonl", "saip.log"):
         f = user_config_dir() / name
         if f.exists() and not keep_config:
             to_delete.append(f)
@@ -455,10 +455,10 @@ def is_ready(settings=None) -> bool:
     return bool(load_manifest().get("done")) and bool(settings.llm.base_url and settings.llm.model)
 
 
-def ensure_config(roots: list[str] | None = None) -> Path:
-    """The private.toml in use, created from the template (only you can read it) when there is none yet."""
+def ensure_config(roots: list[str] | None = None, explicit: str | Path | None = None) -> Path:
+    """The private.toml in use (the one `--config` named, if any), created from the template when there is none."""
     from .config_file import write_private
-    found = find_config()
+    found = find_config(explicit)
     if found:
         return found
     target = default_config_path()

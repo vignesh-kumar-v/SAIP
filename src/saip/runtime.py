@@ -133,6 +133,10 @@ class Runtime:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
 
+    def sync_chats(self, settings) -> None:
+        """Save chats to disk or not, as `keep_chats` says (turning it off deletes the file)."""
+        self.chats.configure(user_config_dir() / "chats.jsonl" if settings.agent.keep_chats else None)
+
     def reload(self) -> None:
         """Pick up new settings: stop and start again (the dashboard and the tray stay connected)."""
         was = self.running or self.state["running"]
@@ -166,6 +170,7 @@ class Runtime:
         opts, plat, aw, bus, ui = self.opts, self.plat, self.aw, self.bus, self.ui
         settings = load_settings(opts.config)
         cfg, llm = settings.agent, settings.llm
+        self.sync_chats(settings)
         client, mode, label = None, "score-only", "score only (no LLM endpoint configured: scores are printed, nothing is decided)"
         if opts.mock_llm:
             client, mode, label = MockClient(), "mock", "MOCK LLM (pipeline check only)"

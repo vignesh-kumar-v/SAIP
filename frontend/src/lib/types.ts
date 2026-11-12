@@ -138,6 +138,7 @@ export type Settings = {
     monitor_typed_content: boolean;
     typed_text_max_chars: number;
     notify_offers: boolean;
+    keep_chats?: boolean;
   };
 };
 

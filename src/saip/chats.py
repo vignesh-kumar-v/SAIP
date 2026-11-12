@@ -1,4 +1,8 @@
-"""Conversations with the model, kept in memory for this run (nothing is written to disk).
+"""Conversations with the model. By default they live in memory for this run and nothing is written to disk.
+
+With "keep chats between runs" on (`keep_chats` in private.toml), every change is also saved to `chats.jsonl` in the
+settings folder (one conversation per line, readable only by you) and loaded again at the next start. Turning it off
+deletes that file.
 
 A chat has two records. `items` is what the page shows: the person's messages, the model's, the tools it used and the
 actions it proposed (with whether they were approved). `wire` is what the model is sent. Each of the person's messages
@@ -8,8 +12,10 @@ from __future__ import annotations
 
 import copy
 import itertools
+import json
 import threading
 import time
+from pathlib import Path
 
 MAX_CHATS = 20
 MAX_MESSAGE = 4000
@@ -23,10 +29,73 @@ def _undo_write(undo: dict) -> tuple[bool, str]:
 
 
 class Chats:
-    def __init__(self) -> None:
+    def __init__(self, path: Path | None = None) -> None:
         self._lock = threading.Lock()
         self._ids = itertools.count(1)
         self._chats: dict[int, dict] = {}
+        self._path: Path | None = None
+        if path is not None:
+            self.configure(path)
+
+    # ---- keeping them between runs ----
+    @property
+    def path(self) -> Path | None:
+        return self._path
+
+    def configure(self, path: Path | None) -> None:
+        """Start saving to `path` (loading what is there first), or stop and delete the file when `path` is None."""
+        with self._lock:
+            if path is None:
+                if self._path is not None:
+                    self._path.unlink(missing_ok=True)
+                self._path = None
+                return
+            path = Path(path)
+            if self._path == path:
+                return
+            self._path = path
+            if not self._chats:
+                self._load()
+            else:
+                self._save()
+
+    def clear(self) -> int:
+        """Forget every conversation (and the saved file's contents)."""
+        with self._lock:
+            n = len(self._chats)
+            self._chats.clear()
+            self._save()
+            return n
+
+    def _load(self) -> None:
+        try:
+            lines = self._path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        for line in lines:
+            try:
+                c = json.loads(line)
+                cid = int(c["id"])
+                assert isinstance(c["items"], list) and isinstance(c["wire"], list)
+            except (ValueError, KeyError, TypeError, AssertionError):
+                continue                                          # one damaged line must not hide the rest
+            for i in c["items"]:
+                i.pop("_busy", None)                              # an approval interrupted by a restart is retried
+            self._chats[cid] = c
+        for old in sorted(self._chats)[:-MAX_CHATS]:
+            del self._chats[old]
+        self._ids = itertools.count(max(self._chats, default=0) + 1)
+
+    def _save(self) -> None:
+        """Write everything (the lock is held). A failed write is ignored: the chat itself must not break."""
+        if self._path is None:
+            return
+        from .config_file import write_private
+        try:
+            body = "".join(json.dumps(c, ensure_ascii=False) + "\n" for c in sorted(self._chats.values(), key=lambda c: c["id"]))
+            write_private(self._path, body)
+        except (OSError, TypeError, ValueError):
+            pass
 
     def create(self, title: str, context: str = "", screen: dict | None = None, first: str | None = None,
                live: bool = False, looked: list[dict] | None = None) -> int:
@@ -44,6 +113,7 @@ class Chats:
                 self._append(self._chats[cid], "assistant", first)
             for old in sorted(self._chats)[:-MAX_CHATS]:
                 del self._chats[old]
+            self._save()
             return cid
 
     @staticmethod
@@ -68,10 +138,13 @@ class Chats:
     def set_context(self, cid: int, context: str) -> None:
         with self._lock:
             self._chats[cid]["context"] = context
+            self._save()
 
     def add_item(self, cid: int, kind: str, text: str, **fields) -> int:
         with self._lock:
-            return self._append(self._chats[cid], kind, text[:MAX_MESSAGE], **fields)["id"]
+            item_id = self._append(self._chats[cid], kind, text[:MAX_MESSAGE], **fields)["id"]
+            self._save()
+            return item_id
 
     def record(self, cid: int, wire: list[dict], items: list[dict], start: int | None = None) -> None:
         """Add a finished turn and the wire that goes with it. `items` are {"kind", "text", ...fields};
@@ -84,10 +157,12 @@ class Chats:
                     fields["_w"] = start if start is not None else len(c["wire"])
                 self._append(c, it["kind"], it["text"][:MAX_MESSAGE], **fields)
             c["wire"] = list(wire)
+            self._save()
 
     def set_wire(self, cid: int, wire: list[dict]) -> None:
         with self._lock:
             self._chats[cid]["wire"] = list(wire)
+            self._save()
 
     def claim_action(self, cid: int, item_id: int) -> bool:
         """True for the one caller that may now decide this pending action."""
@@ -105,6 +180,7 @@ class Chats:
                 item["action"].update(state=state, detail=detail)
                 item["_undo"] = undo
                 item.pop("_busy", None)
+                self._save()
 
     @staticmethod
     def _find(c: dict, item_id: int) -> dict | None:
@@ -182,4 +258,5 @@ class Chats:
             idx, _ = self._tail(c, item_id)
             c["wire"] = c["wire"][:c["items"][idx]["_w"]]
             del c["items"][idx:]
+            self._save()
         return {"undone": done, "skipped": skipped}

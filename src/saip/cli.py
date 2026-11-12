@@ -161,6 +161,7 @@ def cmd_run(a) -> int:
 
     bus = Bus()
     runtime = Runtime(bus, plat, aw, _run_options(a), ui=UiPlatform(plat, bus))
+    runtime.sync_chats(load_settings(a.config))
     stop = threading.Event()
     ready = threading.Event()
     api = server_mod.Api(bus, plat=plat, aw=aw, runtime=runtime, on_ready=ready.set, on_shutdown=stop.set)

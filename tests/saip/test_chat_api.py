@@ -363,3 +363,78 @@ def test_help_after_an_offer_may_read_first_but_never_proposes(tmp_path):
             return [Choice("Plain help.", finish_reason="stop")]
 
     assert give_help_with_tools(Plain(), "t", "c", None, [], None) == ("Plain help.", [])
+
+
+def test_chats_can_be_kept_between_runs(tmp_path):
+    import json as _json
+    import os
+    import stat
+    import sys
+
+    from saip.chats import Chats
+    path = tmp_path / "cfg" / "chats.jsonl"
+    a = Chats()
+    cid = a.create("Plan", "ctx", {"app": "TextEdit", "text": "draft▌"}, first="Here is a start.")
+    a.record(cid, [{"role": "user", "content": "hi"}], [{"kind": "user", "text": "hi"}], 0)
+    assert not path.exists()                                  # off by default: nothing on disk
+    a.configure(path)                                         # switching on writes what is already there
+    assert len(path.read_text().splitlines()) == 1
+    a.add_item(cid, "assistant", "More.")
+    a2 = Chats(path)                                          # the next run
+    got = a2.get(cid)
+    assert [i["text"] for i in got["items"]] == ["Here is a start.", "hi", "More."] and got["context"] == "ctx"
+    assert got["wire"] == [{"role": "user", "content": "hi"}]
+    assert a2.create("Next") == cid + 1                       # ids carry on after the loaded ones
+    if not sys.platform.startswith("win"):
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    with path.open("a") as f:
+        f.write("not json\n")
+    assert len(Chats(path).listing()) == 2                    # a damaged line is skipped, the rest load
+    a2.configure(None)                                        # switching off deletes the file
+    assert not path.exists() and len(a2.listing()) == 2       # ...but this run's chats stay in memory
+    b = Chats(path)
+    b.create("x")
+    assert b.clear() == 1 and Chats(path).listing() == []
+    assert _json.loads("[]") == []
+
+
+def test_an_interrupted_approval_can_be_retried_after_a_restart(tmp_path):
+    from saip.chats import Chats
+    path = tmp_path / "chats.jsonl"
+    a = Chats(path)
+    cid = a.create("t")
+    item = a.add_item(cid, "action", "Write x", action={"name": "write_file", "title": "Write x", "path": None,
+                                                         "content": "", "diff": None, "exists": False,
+                                                         "state": "pending", "detail": None}, _call="c1", _args={})
+    assert a.claim_action(cid, item) and not a.claim_action(cid, item)       # claimed: a second approve is refused
+    a.add_item(cid, "assistant", "saved with the claim in flight")
+    assert Chats(path).claim_action(cid, item)                               # a restart forgets the claim
+
+
+def test_settings_switch_chat_saving_and_clear_forgets(rig, monkeypatch):
+    from llm import config as llm_config
+    from saip import runtime
+    path = rig.root.parent / "cfg" / "chats.jsonl"
+    monkeypatch.setattr(runtime, "user_config_dir", lambda: rig.root.parent / "cfg")
+    rig.rt.sync_chats = lambda settings: runtime.Runtime.sync_chats(rig.rt, settings)
+    rig.rt.running = False
+    api, rt = rig.api, rig.rt
+    assert llm_config.load_settings(rig.root.parent / "private.toml").agent.keep_chats is False
+    api.save_settings({"agent": {"keep_chats": True}})
+    assert path.exists() and api.chats()["keeping"] is True      # what is open now is written at once
+    rt.chats.create("kept")
+    assert len(path.read_text().splitlines()) == 2
+    assert api.chats_clear() == {"ok": True, "removed": 2} and rt.chats.listing() == []
+    assert path.read_text() == ""
+    api.save_settings({"agent": {"keep_chats": False}})
+    assert not path.exists() and api.chats()["keeping"] is False
+
+
+def test_settings_are_written_to_the_file_that_config_named(rig):
+    other = rig.root.parent / "other.toml"
+    other.write_text('[llm]\nmodel = "m"\n')
+    rig.rt.opts.config = str(other)
+    rig.rt.running = False
+    rig.api.save_settings({"agent": {"keep_chats": True}})
+    assert "keep_chats = true" in other.read_text()
+    assert "keep_chats" not in (rig.root.parent / "private.toml").read_text()

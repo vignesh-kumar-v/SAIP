@@ -78,6 +78,7 @@ class AgentConfig:
     new_repos: str = "ask"               # what to do with a repository that appears later: ask, add, or ignore
     monitor_typed_content: bool = False  # opt-in typed-text monitor (Linux + macOS); needs the `typing` extra
     typed_text_max_chars: int = 200      # how much of the newest typed text the monitor hands out
+    keep_chats: bool = False             # save chat conversations to chats.jsonl so they survive a restart
     notify_offers: bool = True           # a system notification with each offer, so it is seen with the dashboard hidden
 
 

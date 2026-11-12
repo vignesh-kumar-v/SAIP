@@ -186,7 +186,10 @@ press Approve: copying to the clipboard, and writing a plain-text or code file i
 DuckDuckGo's HTML page by default, or Brave / Tavily with a key; pages on this machine or a private network are
 refused. You can edit an earlier message and send it again, or rewind to it: both drop everything after it and put
 back files written since (a file you changed afterwards is left alone; a clipboard copy or a search cannot be undone).
-What a tool reads goes to your model endpoint, and search words go to the search service.
+What a tool reads goes to your model endpoint, and search words go to the search service. Chats live in memory and
+disappear when SAIP stops; switch on "Keep chats between runs" (Settings > Saved chats, `keep_chats` under `[agent]`) to
+save them to `chats.jsonl` in the settings folder (readable only by you). Turning it off deletes the file, "Delete all
+chats" empties it, and `saip uninstall` removes it.
 
 **Launch at login.** Off by default; switch it on from the tray or Settings. It adds a LaunchAgent on macOS, a
 value under the user's `Run` registry key on Windows, or an XDG autostart entry on Linux, and starts
