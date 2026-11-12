@@ -24,8 +24,8 @@ FALLBACK_MESSAGE = "Looks like you may be stuck. Want a hand?"
 MAX_TASK, MAX_MESSAGE = 80, 240
 
 SYSTEM = """You write a short offer of help for someone whose computer activity suggests they may be stuck.
-You see a summary of behaviour (windows, switches, input and terminal counts). Sometimes you also see window titles
-and the text near the person's cursor.
+You see a summary of behaviour (windows, switches, input and terminal counts). Sometimes you also see window titles,
+text the person recently typed, and the text near the person's cursor.
 
 Reply with one JSON object and nothing else:
 {"Purpose": "what the person seems to be doing, from behaviour only",
@@ -33,8 +33,8 @@ Reply with one JSON object and nothing else:
  "Response": "one friendly sentence offering it, under 30 words"}
 
 Rules:
-- Use only facts in what you are given. When text or a window title is shown, refer to what it actually says
-  (the topic, the sentence that seems unfinished, the error); never invent anything beyond it.
+- Use only facts in what you are given. When typed text, screen text or a window title is shown, refer to what it
+  actually says (the topic, the sentence that seems unfinished, the error); never invent anything beyond it.
 - When no text or title is shown, do not guess the subject, language or cause: describe the pattern in plain words.
 - Offer something specific to what you can see (finishing a sentence, explaining that error, tightening a
   paragraph), or something general (talking it through, a second look) when you can see nothing.

@@ -5,7 +5,8 @@ deliberately does not include the classifier's stuck score: that score already s
 showing it to the model would make the model's answer an echo of it rather than a second opinion.
 
 Privacy: window titles stay out unless `include_titles` is on, and apps on the private list are never
-named. Keys are only ever counted, never recorded.
+named. Typed text (the opt-in typing monitor, as in thunlp/ProactiveAgent's `user_input`) is included only when the
+caller passes it; the caller decides whether that is allowed. Without it, keys are only ever counted.
 """
 from __future__ import annotations
 
@@ -41,7 +42,7 @@ def _visits(window: list, t0: float, t1: float, private: tuple, titles: bool) ->
 
 
 def build_context(trace: Trace, t_end: float, lookback_s: float = 300.0, include_titles: bool = False,
-                  private_apps: tuple = ()) -> str:
+                  private_apps: tuple = (), typed_text: str | None = None) -> str:
     t0 = t_end - lookback_s
     visits = _visits(trace.streams["window"], t0, t_end, private_apps, include_titles)
     lines = [f"Activity over the last {lookback_s / 60:.0f} minutes (oldest first):"]
@@ -67,6 +68,9 @@ def build_context(trace: Trace, t_end: float, lookback_s: float = 300.0, include
                      + (f"last input {ago:.0f}s ago." if ago is not None else "no input at all."))
     else:
         lines.append("Input: not recorded.")
+    typed = " ".join((typed_text or "").split())
+    if typed:
+        lines.append(f'Recently typed (oldest first, newest last): "{typed}"')
 
     if trace.hooks:
         cmds = [e for e in trace.streams.get("terminal", []) if t0 <= e["t"] + e["duration"] <= t_end]

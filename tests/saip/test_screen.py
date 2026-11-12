@@ -1,5 +1,5 @@
 from saip import screen
-from saip.screen import SEP, Screen, is_local, parse, read_screen, redact, window_text
+from saip.screen import SEP, Screen, parse, read_screen, redact, typed_for_model, window_text
 
 PAGE = "The results section argues that the gate lowers false alarms, but " * 3
 
@@ -17,20 +17,24 @@ def out(app, cur, text):
     return SEP.join([app, str(cur), text])
 
 
-def test_only_local_endpoints_are_allowed():
-    assert is_local("http://localhost:11434/v1") and is_local("http://127.0.0.1:8000/v1")
-    assert not is_local("https://api.openai.com/v1") and not is_local("http://192.168.1.5:11434/v1")
-    assert not is_local("")
+def test_typed_text_is_passed_through_for_any_endpoint():
+    assert typed_for_model("the delay is caused by") == "the delay is caused by"
+    assert typed_for_model("   ") is None and typed_for_model(None) is None
 
 
-def test_a_remote_endpoint_never_triggers_a_read():
-    p = FakePlat(out("Word", 0, PAGE))
-    assert read_screen(p, "https://api.example.com/v1") is None and p.calls == 0
+def test_typed_text_has_secrets_masked():
+    out = typed_for_model("password: hunter2 and then the report")
+    assert "hunter2" not in out and "[hidden]" in out and "the report" in out
 
 
-def test_text_is_read_for_a_local_endpoint():
-    s = read_screen(FakePlat(out("Word", 10, PAGE)), "http://localhost:11434/v1")
+def test_text_is_read_whatever_the_endpoint():
+    s = read_screen(FakePlat(out("Word", 10, PAGE)))
     assert isinstance(s, Screen) and s.app == "Word" and "gate lowers" in s.text
+
+
+def test_the_private_list_is_still_honoured_when_reading():
+    p = FakePlat(out("Mail", 10, PAGE))
+    assert read_screen(p, ("mail",)) is None
 
 
 def test_private_apps_and_blank_pages_are_skipped():

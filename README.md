@@ -127,11 +127,30 @@ passed to the next offer's prompt. Every offer is appended to `offers.jsonl` in 
 numbers, the offer text and the outcome, nothing about your windows or typing. `saip run --no-dialog` prints offers
 instead (`--notify` then shows a notification), and `saip offers` summarises the record.
 
-**Context from your screen (opt-in).** thunlp gets its context from raw window titles and typed keys. SAIP never logs
-keys. Instead, `include_titles = true` adds window titles, and `read_screen = true` (or `saip run --read-screen`) reads
-the text around your cursor in the front app only at the moment an offer is written, so the offer can say what you are
-actually working on. It refuses unless the model endpoint is on this machine, skips apps on the private list and
-password fields, masks keys and tokens, and keeps at most `screen_chars` (1200) characters. Pressing **Help me** then
+**Dashboard and local API.** `saip run --ui` also serves a page at `http://localhost:5610/` (change with `--ui-port`):
+the stuck score over the last 30 minutes, the last gate decision in words, the offer record and the `saip doctor`
+checks. While the page is open, offers, the help text and the new-repository question appear there with the same
+buttons; with it closed they fall back to the system dialog. The page is one client of a small API (`saip/server.py`):
+`GET /api/events` streams every tick, decision, offer and outcome as server-sent events, and `POST /api/asks/<id>`
+answers an open question, so a tray popup or any other UI can use the same two calls. It listens on 127.0.0.1 only,
+refuses other hosts and cross-site POSTs, and carries scores, gate numbers and offer text: no window titles, no
+activity summary. `python -m saip.server --demo` serves the page with made-up activity, for working on a UI without
+ActivityWatcher or a model.
+
+**Tray icon and popup.** `pip install "saip[tray]"`, then `saip run --tray` (or `saip tray` beside an agent already
+running with `--ui`). The icon shows the state (in flow, possibly stuck, paused, agent not running) and its menu opens
+the dashboard or pauses offers for an hour. An offer appears as a small popup in the corner of the screen with the
+same buttons and time limit. The popup never takes the keyboard, so typing cannot answer it; whichever of the popup
+and the dashboard is answered first wins and the other closes. It is a separate process that uses only the API above.
+Written for Windows and Linux and not yet run on a real machine; on macOS, and where Python has no tkinter, the
+question falls back to the system dialog.
+
+**Context from your screen (opt-in).** thunlp gets its context from raw window titles and typed keys. SAIP's default
+only counts keys. `include_titles = true` adds window titles, the typed-text monitor (below) adds what you typed, and
+`read_screen = true` (or `saip run --read-screen`) reads the text around your cursor in the front app only at the
+moment an offer is written, so the offer can say what you are actually working on. All of these go to whichever model
+endpoint you configure, local or remote. Screen reading skips apps on the private list and password fields, masks
+keys and tokens, and keeps at most `screen_chars` (1200) characters. Pressing **Help me** then
 has the model write concrete help from the same text, shown in a dialog (with **Copy**); SAIP never types into your
 documents. On macOS the app running `saip` needs Accessibility (System Settings > Privacy & Security). Other systems
 do not read the screen yet.
@@ -157,9 +176,21 @@ On Linux, ActivityWatcher's window watcher needs an X11 session; Wayland cannot 
 `classifier/categories.py` also lists Windows and Linux app names on a best-effort basis: an unknown app counts
 as "other" and does not count as work, so extend the sets when a real export shows new names.
 
-**Privacy.** Keys are counted, never recorded. The terminal hook sends an exit code and a hash, not the command.
+**Typed-text monitor (opt-in, Linux and macOS).** Off by default. With `monitor_typed_content = true` and the
+optional extra installed (`pip install -e ".[typing]"`, which adds `pynput`; on macOS the app running `saip` needs
+Input Monitoring), SAIP keeps the newest `typed_text_max_chars` (200) typed characters in memory. It records only
+while an app on a short whitelist (editors, Word, browsers) is in front, never in an app on `private_apps`, and
+empties the buffer when you leave. Shortcuts are ignored, Esc clears the buffer, F1 turns it off. Nothing is written
+to disk or printed. The newest typed text is added to the behaviour summary the model sees, as thunlp/ProactiveAgent
+does with its `user_input`: it reaches the two yes/no questions, the offer and the help, whichever endpoint you
+configured (local or remote). Obvious secrets such as API keys and `password: ...` are masked first. The
+classifier score does not use it. The whitelist is per app, not per field, so a password box inside an allowed
+browser can still be read: drop the browser from the whitelist if that matters. Window titles are a separate switch
+(`include_titles = true`), and page or editor text comes from `read_screen`.
+
+**Privacy.** Unless you turn on the typed-text monitor, keys are counted, never recorded. The terminal hook sends an exit code and a hash, not the command.
 What the model sees is a short summary of app names, dwell times and counts; window titles stay out unless
-`include_titles = true`, and apps on `private_apps` are never named. Everything is sent only to the endpoint you
+`include_titles = true`, typed text only with the monitor on (see above), and apps on `private_apps` are never named. Everything is sent only to the endpoint you
 configure.
 
 ## The LLM layer (Phase 3)

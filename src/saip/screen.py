@@ -5,19 +5,17 @@ focused text field through the OS instead of logging keys: it shows what is on t
 that exposes text (Word, Notes, an editor, a terminal) and nothing is recorded between offers. It runs only when
 an offer is about to be written, never on a timer.
 
-Guards, all on by design:
+Kept on by design:
 * opt-in (`read_screen` in private.toml or `saip run --read-screen`)
-* the model endpoint must be on this machine (localhost); otherwise nothing is read
 * apps on the private list, and password fields, are never read
 * obvious secrets are masked, and only a window of text around the cursor is kept
+The model endpoint may be remote: this is a research tool and the text goes to whichever endpoint you configure.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
 
-LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"}
 TERMINALS = ("terminal", "iterm", "ghostty", "kitty", "wezterm", "alacritty", "warp", "hyper", "tabby")
 SEP = "<<SAIP>>"
 MIN_CHARS = 20                       # less than this is a blank page, not context
@@ -35,11 +33,6 @@ _SECRETS = [
 class Screen:
     app: str
     text: str
-
-
-def is_local(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    return host in LOCAL_HOSTS or host.endswith(".localhost")
 
 
 def redact(text: str) -> str:
@@ -74,6 +67,13 @@ def parse(output: str, private_apps: tuple, limit: int) -> Screen | None:
     return Screen(app, body) if len(body) >= MIN_CHARS else None
 
 
+def typed_for_model(text: str | None) -> str | None:
+    """Typed text as the model sees it: obvious secrets masked, nothing else filtered. None when there is none."""
+    if not text or not text.strip():
+        return None
+    return redact(text).strip() or None
+
+
 def copy_to_clipboard(text: str) -> bool:
     import shutil
     import subprocess
@@ -89,10 +89,8 @@ def copy_to_clipboard(text: str) -> bool:
         return False
 
 
-def read_screen(plat, endpoint: str, private_apps: tuple = (), limit: int = 1200) -> Screen | None:
-    """The focused text in the front app, or None (not allowed, nothing readable, or not supported here)."""
-    if not is_local(endpoint):
-        return None
+def read_screen(plat, private_apps: tuple = (), limit: int = 1200) -> Screen | None:
+    """The focused text in the front app, or None (private app, nothing readable, or not supported here)."""
     raw = plat.read_screen()
     if not raw:
         return None
