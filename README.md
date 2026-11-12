@@ -368,6 +368,10 @@ python -m llm replay --split dev --fit                # real endpoint: fit calib
 python -m llm replay --split test                     # report on the held-out people
 ```
 
+`python -m llm bench` runs the same two questions and the gate on ProactiveBench (a clone of thunlp/ProactiveAgent in
+`ProactiveAgent/`) and compares always speaking, a fixed bar, PRISM's bar and SAIP's gate. One run and what it showed
+are in [docs/ProactiveBench_Results.md](docs/ProactiveBench_Results.md).
+
 `--mock` is a stand-in that checks the plumbing and says nothing about a real model. The generator has no "would
 accept" label, so `--fit` uses the stuck label in its place. Both caveats are printed. Because the labels come from our own
 generator, replay numbers test the pipeline and are not evidence about real users.

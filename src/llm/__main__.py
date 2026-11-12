@@ -1,14 +1,17 @@
-"""python -m llm replay | gate
+"""python -m llm replay | gate | bench
 
   replay   run synthetic days through the probes and the gate and report (needs an endpoint, or --mock)
   gate     print the bar tau for a grid of stuck scores, to see what the costs do
+  bench    run the policies, SAIP's gate included, on ProactiveBench sessions and report (endpoint, or --mock)
 """
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
+from . import bench
 from .calibration import load_temperatures, save_temperatures
 from .client import LLMError, OpenAIChatClient
 from .config import load_settings, user_config_dir
@@ -60,6 +63,39 @@ def cmd_gate(a) -> int:
     return 0
 
 
+def cmd_bench(a) -> int:
+    settings = load_settings(a.config)
+    if a.mock:
+        client, model = MockClient(), "mock"
+    else:
+        try:
+            client, model = OpenAIChatClient(settings.llm), settings.llm.model
+        except ValueError as e:
+            print(f"error: {e}\n(use --mock to run the pipeline without a model)", file=sys.stderr)
+            return 2
+    sessions = bench.load_sessions(Path(a.data))
+    if not sessions:
+        print(f"error: no sessions found in {a.data}", file=sys.stderr)
+        return 2
+    if a.limit:
+        sessions = bench.take(sessions, a.limit)
+    t0 = time.time()
+
+    def progress(done, total):
+        if done % 10 == 0 or done == total:
+            print(f"steps {done}/{total}  {time.time() - t0:.0f}s", file=sys.stderr)
+
+    skipped: list = []
+    rows = bench.run_probes(client, sessions, Path(a.cache), a.history, progress, model, skipped)
+    for name, i, err in skipped:
+        print(f"skipped {name} step {i}: {err}", file=sys.stderr)
+    print(bench.report(rows, settings, len(skipped), model, a.mock))
+    if a.out:
+        bench.write_rows(Path(a.out), rows)
+        print(f"\nper-step rows written to {a.out}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m llm")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -80,6 +116,15 @@ def main(argv=None) -> int:
     g.add_argument("--p-accept", type=float, default=0.5)
     g.add_argument("--config")
     g.set_defaults(fn=cmd_gate)
+    b = sub.add_parser("bench", help="score the gate and other policies on ProactiveBench sessions")
+    b.add_argument("--data", default="ProactiveAgent/dataset/test_data")
+    b.add_argument("--mock", action="store_true", help="deterministic stand-in for the model")
+    b.add_argument("--cache", default="data/bench/probes.jsonl", help="probe results, so a run can resume")
+    b.add_argument("--history", type=int, default=15, help="how many recent events the model sees")
+    b.add_argument("--out", default="data/bench/rows.jsonl", help="write per-step rows as jsonl")
+    b.add_argument("--config", help="path to private.toml")
+    b.add_argument("--limit", type=int, default=0, help="probe only the first N steps")
+    b.set_defaults(fn=cmd_bench)
     args = ap.parse_args(argv)
     return args.fn(args)
 
