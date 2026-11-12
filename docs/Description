@@ -1,0 +1,26 @@
+What it is
+Until now SAIP only printed to the terminal and used system dialogs. This adds three things on top, without
+changing the classifier, the gate or the LLM layer:
+
+1. A local API. `saip run --ui` streams every score, gate decision, offer and answer on localhost:5610.
+2. A dashboard at http://localhost:5610/. It shows the current state (in flow / possibly stuck / paused), the
+   stuck score over the last 30 minutes, the last gate decision in plain words, the offer history, and the
+   `saip doctor` checks.
+3. A tray icon and popup. `saip run --tray` adds an icon by the clock that shows the state, and offers appear
+   as a small popup in the corner with Help me / Not now. The menu can pause offers for an hour.
+
+Offers can be answered in the popup or the dashboard. With neither open, they fall back to the old dialog.
+
+Try it in two minutes
+`python -m saip.server --demo` serves the dashboard with made-up activity. No ActivityWatch or model needed.
+Full setup steps are in docs/UI_SETUP.md on the branch.
+
+Where it stands
+- Run on Windows 11 with real ActivityWatch data and the mock model. Tests pass (298).
+- Not yet run on macOS, and not yet with a real model, so offer and help text are placeholders for now.
+- The dashboard is a single HTML file with no build step, so it's easy to change.
+
+Things I noticed while testing
+- The stuck score ignores typing and reacts mostly to switching between the same few windows, so focused
+  work across two or three windows reads as stuck.
+- ActivityWatch's input watcher has to be switched on by hand or SAIP waits forever. UI_SETUP.md covers it.

@@ -127,6 +127,24 @@ passed to the next offer's prompt. Every offer is appended to `offers.jsonl` in 
 numbers, the offer text and the outcome, nothing about your windows or typing. `saip run --no-dialog` prints offers
 instead (`--notify` then shows a notification), and `saip offers` summarises the record.
 
+**Dashboard and local API.** `saip run --ui` also serves a page at `http://localhost:5610/` (change with `--ui-port`):
+the stuck score over the last 30 minutes, the last gate decision in words, the offer record and the `saip doctor`
+checks. While the page is open, offers, the help text and the new-repository question appear there with the same
+buttons; with it closed they fall back to the system dialog. The page is one client of a small API (`saip/server.py`):
+`GET /api/events` streams every tick, decision, offer and outcome as server-sent events, and `POST /api/asks/<id>`
+answers an open question, so a tray popup or any other UI can use the same two calls. It listens on 127.0.0.1 only,
+refuses other hosts and cross-site POSTs, and carries scores, gate numbers and offer text: no window titles, no
+activity summary. `python -m saip.server --demo` serves the page with made-up activity, for working on a UI without
+ActivityWatcher or a model.
+
+**Tray icon and popup.** `pip install "saip[tray]"`, then `saip run --tray` (or `saip tray` beside an agent already
+running with `--ui`). The icon shows the state (in flow, possibly stuck, paused, agent not running) and its menu opens
+the dashboard or pauses offers for an hour. An offer appears as a small popup in the corner of the screen with the
+same buttons and time limit. The popup never takes the keyboard, so typing cannot answer it; whichever of the popup
+and the dashboard is answered first wins and the other closes. It is a separate process that uses only the API above.
+Written for Windows and Linux and not yet run on a real machine; on macOS, and where Python has no tkinter, the
+question falls back to the system dialog.
+
 **Context from your screen (opt-in).** thunlp gets its context from raw window titles and typed keys. SAIP's default
 only counts keys. `include_titles = true` adds window titles, the typed-text monitor (below) adds what you typed, and
 `read_screen = true` (or `saip run --read-screen`) reads the text around your cursor in the front app only at the

@@ -5,6 +5,7 @@
   saip doctor     check every moving part and say what is wrong
   saip repo       add / list / remove the folders whose git repositories get the commit hook
   saip offers     what happened to past offers (accepted, dismissed, ignored)
+  saip tray       tray icon and offer popup for an agent running with --ui
   saip uninstall  put the machine back exactly as it was before SAIP
 """
 from __future__ import annotations
@@ -27,10 +28,12 @@ from llm.replay import MockClient
 from . import offers as offers_mod
 from . import prompts as repos_mod_prompts
 from . import repos as repos_mod
+from . import server as server_mod
 from . import setup as setup_mod
-from . import typing_monitor as typing_monitor_mod
 from .agent import NotReady, Orchestrator, describe, fetch_trace, score_now
 from .aw import DEFAULT_URL, ActivityWatch, AWError
+from .events import Bus, UiPlatform
+from .tray import main as tray_main
 from .hooks import githook
 from .platform import current
 from .screen import copy_to_clipboard, read_screen, typed_for_model
@@ -154,18 +157,31 @@ def cmd_run(a) -> int:
     temps = load_temperatures(user_config_dir() / "calibration.json")
     git = GitWatcher(aw, [])             # polls only accepted repositories where a hook cannot be installed
     last_scan = 0.0
+    bus, ui = Bus(), plat                # `ui` shows dialogs in the dashboard when one is open, else as before
+    tray = None
+    if a.ui or a.tray:
+        try:
+            httpd = server_mod.start(bus, a.ui_port)
+            ui = UiPlatform(plat, bus)
+            print(f"Dashboard at {server_mod.url(httpd)}")
+            if a.tray:                   # its own process: it talks to the API like any other UI
+                tray = subprocess.Popen([sys.executable, "-m", "saip.tray", "--follow", "--port", str(httpd.server_address[1])])
+        except OSError as e:
+            print(f"could not start the dashboard on port {a.ui_port} ({e}); carrying on without it")
 
     def accepted_now(state, hooked):
         if not hooked:
             git.repos = list(dict.fromkeys(git.repos + [state.path]))
         setup_mod.update_manifest(hooked_repos=[str(state.path)] if hooked else [])
-    prompter = repos_mod_prompts.RepoPrompter(plat, sys.executable, cfg.new_repos, accepted_now)
+    prompter = repos_mod_prompts.RepoPrompter(ui, sys.executable, cfg.new_repos, accepted_now)
     prompter.start()
     orch = Orchestrator(cfg)
 
     # Opt-in typed-text monitor (Linux + macOS). Never records apps on the private list.
-    monitor = typing_monitor_mod.TypingMonitor(clip_chars=cfg.typed_text_max_chars, blocked=settings.llm.private_apps)
+    monitor = None
     if cfg.monitor_typed_content:
+        from . import typing_monitor as typing_monitor_mod     # pynput is optional, so load it only when asked for
+        monitor = typing_monitor_mod.TypingMonitor(clip_chars=cfg.typed_text_max_chars, blocked=settings.llm.private_apps)
         try:
             monitor.start()
             print("Typed-text monitor on (memory only; F1 turns it off).", flush=True)
@@ -197,7 +213,8 @@ def cmd_run(a) -> int:
             print(f"{time.strftime('%H:%M:%S')}  could not write the help ({e})")
             return
         print(f"          help: {text}")
-        if presenter.dialog and plat.ask("SAIP", text, ("Close", "Copy"), timeout=180, default=False) == "Copy":
+        bus.publish("help", text=text)
+        if presenter.dialog and ui.ask("SAIP", text, ("Close", "Copy"), timeout=180, default=False) == "Copy":
             copy_to_clipboard(text)
 
     def answered(offer, outcome):
@@ -205,9 +222,10 @@ def cmd_run(a) -> int:
         if outcome != offers_mod.UNANSWERED:
             extra = f" (quiet period x{orch.cooldown_mult:g})" if outcome != offers_mod.ACCEPTED else ""
             print(f"{time.strftime('%H:%M:%S')}  offer {outcome}{extra}")
+        bus.publish("outcome", outcome=outcome, cooldown_mult=orch.cooldown_mult)
         if outcome == offers_mod.ACCEPTED and client is not None:
             help_out(offer)
-    presenter = offers_mod.OfferPresenter(plat, cfg.offer_timeout_s, use_dialog=not a.no_dialog, on_outcome=answered)
+    presenter = offers_mod.OfferPresenter(ui, cfg.offer_timeout_s, use_dialog=not a.no_dialog, on_outcome=answered)
     print(f"Watching on {plat.name}. Mode: {mode}\nCtrl-C to stop.\n")
     last_status = 0.0
     try:
@@ -226,21 +244,25 @@ def cmd_run(a) -> int:
             git.poll(now)
             try:
                 trace = fetch_trace(aw, now, cfg.history_min * 60)
-                typed_text = monitor.get_current_text() if monitor.running else None
+                typed_text = monitor.get_current_text() if monitor is not None and monitor.running else None
                 tick = score_now(trace, now, typed_text=typed_text)
                 if a.trigger is not None:
                     tick.theta_trig = a.trigger                # testing: wake the LLM at this score instead
             except NotReady as e:
                 if now - last_status > 60:
                     print(f"{time.strftime('%H:%M:%S')}  waiting: {e}")
+                    bus.publish("status", level="waiting", text=str(e))
                     last_status = now
                 time.sleep(cfg.tick_s)
                 continue
             except AWError as e:
                 print(f"{time.strftime('%H:%M:%S')}  {e}")
+                bus.publish("status", level="error", text=str(e))
                 time.sleep(15)
                 continue
-            if client is not None:
+            bus.publish("tick", time=tick.time, score=round(tick.stuck_score, 4), paused=tick.paused,
+                        reason=tick.reason, trigger=tick.theta_trig)
+            if client is not None and now >= bus.quiet_until:      # the user can pause offers from the tray
                 def run_assess():
                     typed = typed_for_model(typed_text)
                     seen["context"] = build_context(trace, tick.time, settings.llm.lookback_s,
@@ -251,10 +273,14 @@ def cmd_run(a) -> int:
                     ev = orch.step(now, tick, run_assess)
                 except LLMError as e:
                     print(f"{time.strftime('%H:%M:%S')}  LLM error: {e}")
+                    bus.publish("status", level="error", text=f"LLM error: {e}")
                     ev = None
                     orch.last_assess = now
                 if ev:
                     print(describe(now, tick, ev))
+                    d = ev.assessment.decision
+                    bus.publish("decision", decision=ev.kind, score=round(tick.stuck_score, 4), p_need=round(d.p_need, 4),
+                                p_accept=round(d.p_accept, 4), bar=round(d.tau, 4), resampled=ev.assessment.resampled)
                     if ev.kind == "offer":
                         proposal = FALLBACK
                         seen["screen"] = look()
@@ -265,6 +291,7 @@ def cmd_run(a) -> int:
                         except LLMError as e:
                             print(f"{time.strftime('%H:%M:%S')}  could not write the offer ({e}); using the plain one")
                         print(f"          >>> {proposal.message}")
+                        bus.publish("offer", message=proposal.message, task=proposal.task, generated=proposal.generated)
                         if not presenter.dialog and a.notify:
                             plat.notify("SAIP", proposal.message)
                         presenter.submit(offers_mod.make_offer(now, ev.assessment.decision, ev.assessment.resampled, proposal))
@@ -275,9 +302,12 @@ def cmd_run(a) -> int:
                 last_status = now
             time.sleep(cfg.tick_s)
     except KeyboardInterrupt:
+        if tray is not None and tray.poll() is None:
+            tray.terminate()
         prompter.stop()
         presenter.stop()
-        monitor.stop()
+        if monitor is not None:
+            monitor.stop()
         print("\nStopped.")
         return 0
 
@@ -298,6 +328,9 @@ def main(argv=None) -> int:
     r.add_argument("--read-screen", action="store_true",
                    help="read the text near your cursor when writing an offer (or set read_screen in private.toml)")
     r.add_argument("--config", help="path to private.toml")
+    r.add_argument("--ui", action="store_true", help="serve the dashboard and local API on this machine (offers appear there when it is open)")
+    r.add_argument("--tray", action="store_true", help='also show the tray icon and offer popup (implies --ui; needs pip install "saip[tray]")')
+    r.add_argument("--ui-port", type=int, default=server_mod.DEFAULT_PORT, help=f"port for --ui (default {server_mod.DEFAULT_PORT})")
     r.set_defaults(fn=cmd_run)
     s = sub.add_parser("setup", help="set everything up (safe to repeat)")
     s.add_argument("--yes", action="store_true")
@@ -313,6 +346,9 @@ def main(argv=None) -> int:
     o = sub.add_parser("offers", help="show what happened to past offers")
     o.add_argument("--last", type=int, default=10, help="how many recent offers to list")
     o.set_defaults(fn=cmd_offers)
+    t = sub.add_parser("tray", help="tray icon and offer popup for an agent running with --ui")
+    t.add_argument("--port", type=int, default=server_mod.DEFAULT_PORT, help="the agent's --ui-port")
+    t.set_defaults(fn=lambda a: tray_main(["--port", str(a.port)]))
     u = sub.add_parser("uninstall", help="put the machine back as it was before SAIP")
     u.add_argument("--yes", action="store_true", help="do not ask before reverting")
     u.add_argument("--keep-config", action="store_true", help="keep private.toml and calibration.json")

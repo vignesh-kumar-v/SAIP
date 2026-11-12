@@ -12,8 +12,10 @@ def test_cli_imports_without_pynput(monkeypatch):
     monkeypatch.setitem(sys.modules, "pynput", None)          # makes `import pynput` raise ImportError
     for name in [n for n in sys.modules if n == "saip.cli" or n == "saip.typing_monitor"]:
         monkeypatch.delitem(sys.modules, name)
-    import saip.cli
-    assert saip.cli.typing_monitor_mod.keyboard is None
+    import importlib
+    import saip.cli                                            # must not need pynput
+    tm = importlib.import_module("saip.typing_monitor")        # imported fresh: the monitor loads, listener missing
+    assert tm.keyboard is None
 
 
 def test_example_config_loads():
