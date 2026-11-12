@@ -43,7 +43,9 @@ export function Chat() {
       list.reload();
       if (first) send(first, c);
     } catch (e: any) {
-      setError(e instanceof ApiError ? e.message : String(e));
+      setError(e instanceof ApiError && e.status === 404
+        ? "This SAIP is older than the page: stop it (Ctrl-C) and start it again with `saip run`."
+        : e instanceof ApiError ? e.message : String(e));
     }
   };
 
@@ -79,9 +81,10 @@ export function Chat() {
   return (
     <div className="grid h-[calc(100vh-7rem)] min-h-[460px] gap-5 lg:grid-cols-[260px_1fr]">
       <Card className="scroll-thin hidden min-h-0 flex-col overflow-auto p-2 lg:flex">
-        <Button variant="subtle" size="sm" className="m-1 mb-2" onClick={() => create()}>
+        <Button variant="subtle" size="sm" className="m-1 mb-2" onClick={() => (setCurrent(null), create())}>
           <MessageSquarePlus size={15} /> New chat
         </Button>
+        {error && !current && <p className="px-3 pb-2 text-[12px] text-stuck">{error}</p>}
         {list.data?.chats.length === 0 && <p className="px-3 py-2 text-[12.5px] text-faint">Conversations start when you press “Help me”, or here.</p>}
         <ul className="space-y-0.5">
           {list.data?.chats.map((c) => (
@@ -106,6 +109,7 @@ export function Chat() {
                 SAIP's assistant knows what you were doing in the last few minutes. It only talks: it never types or changes anything on your machine.
               </p>
             </div>
+            {error && <div className="max-w-md rounded-xl border border-stuck/40 bg-stuck-soft px-3.5 py-2 text-[13px] text-ink">{error}</div>}
             {!available ? (
               <Empty>No model is connected. Add one in Settings, then come back.</Empty>
             ) : (
