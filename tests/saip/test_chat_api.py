@@ -39,10 +39,11 @@ class Model:
 def rig(sandbox, monkeypatch):  # noqa: F811
     root = sandbox / "work"
     root.mkdir()
-    (sandbox / "private.toml").write_text(f'[agent]\nwatch_roots = ["{root}"]\n')
+    (sandbox / "private.toml").write_text(f'[agent]\nwatch_roots = [{json.dumps(str(root))}]\n')      # json: a Windows path has backslashes
     copied = []
     monkeypatch.setattr(chat_tools, "copy_to_clipboard", lambda t: copied.append(t) or True)
-    rt = SimpleNamespace(chats=Chats(), client=Model(), last_context="Activity: 3 switches.",
+    rt = SimpleNamespace(chats=Chats(), client=Model(), last_context="Activity: 3 switches.", running=False,
+                         status=lambda: {"running": False, "mode": "stopped"},
                          look=lambda: None, snapshot_context=lambda: "Activity: 3 switches.",
                          opts=SimpleNamespace(config=str(sandbox / "private.toml")))
     api = server.Api(Bus(), plat=FakePlatform(None), aw=FakeAW(up=False), runtime=rt)
