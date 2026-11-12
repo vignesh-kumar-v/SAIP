@@ -106,6 +106,8 @@ def sandbox(tmp_path, monkeypatch):
     for mod in (llm_config, setup_mod):
         monkeypatch.setattr(mod, "user_config_dir", lambda: tmp_path / "cfg")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))          # launch-at-login files live under the home folder
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
     for v in ("SAIP_CONFIG", "SAIP_LLM_BASE_URL", "SAIP_LLM_MODEL", "SAIP_LLM_API_KEY"):
         monkeypatch.delenv(v, raising=False)
     return tmp_path

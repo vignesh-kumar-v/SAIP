@@ -6,9 +6,7 @@ where a hook cannot be added safely are listed so they can be polled instead.
 """
 from __future__ import annotations
 
-import json
 import os
-import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
@@ -134,21 +132,8 @@ def describe(states: list[RepoState]) -> list[str]:
 
 def set_config_list(path: Path, section: str, key: str, values: list[str]) -> None:
     """Set `key = [...]` inside `[section]`, keeping everything else in the file as it was."""
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    line = f"{key} = {json.dumps(list(values))}"
-    lines = text.split("\n")
-    start = next((i for i, l in enumerate(lines) if l.strip() == f"[{section}]"), None)
-    if start is None:
-        lines += ([""] if text and not text.endswith("\n\n") else []) + [f"[{section}]", line, ""]
-    else:
-        end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
-        for i in range(start + 1, end):
-            if re.match(rf"\s*{re.escape(key)}\s*=", lines[i]):
-                lines[i] = line
-                break
-        else:
-            lines.insert(start + 1, line)
-    path.write_text("\n".join(lines), encoding="utf-8")
+    from .config_file import set_value
+    set_value(path, section, key, list(values))
 
 
 def with_roots(agent: AgentConfig, roots: list[str]) -> AgentConfig:

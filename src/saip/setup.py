@@ -374,9 +374,10 @@ def plan_uninstall(plat: Platform, aw: ActivityWatch, *, keep_config: bool = Fal
     cal = user_config_dir() / "calibration.json"
     if cal.exists() and not keep_config:
         to_delete.append(cal)
-    offers = user_config_dir() / "offers.jsonl"
-    if offers.exists() and not keep_config:
-        to_delete.append(offers)
+    for name in ("offers.jsonl", "decisions.jsonl", "saip.log"):
+        f = user_config_dir() / name
+        if f.exists() and not keep_config:
+            to_delete.append(f)
     if to_delete:
         def undo_files() -> str:
             for f in to_delete:
@@ -385,6 +386,11 @@ def plan_uninstall(plat: Platform, aw: ActivityWatch, *, keep_config: bool = Fal
         undos.append(Undo("config", "delete " + ", ".join(str(f) for f in to_delete), undo_files))
     elif settings.path and not keep_config and not cfg:
         undos.append(Undo("config", f"keep {settings.path} (it existed before SAIP set anything up)", lambda: "kept"))
+
+    from . import autostart
+    if autostart.is_enabled():
+        undos.append(Undo("launch at login", f"remove {autostart.where()}",
+                          lambda: "removed" if autostart.disable() else "nothing to remove"))
 
     if m.get("activitywatch_installed_by_saip"):
         data = plat.activitywatch_data_dir()
@@ -437,3 +443,160 @@ def uninstall(plat: Platform, aw: ActivityWatch, *, yes: bool = False, keep_conf
         results.append(r)
         out(r.line())
     return results
+
+
+# ---------------------------------------------------------------------------------------------------- web setup
+# The setup wizard in the dashboard walks the same steps as `run_setup`, one request at a time. These functions
+# are those steps without the terminal prompts.
+
+def is_ready(settings=None) -> bool:
+    """Setup has been finished and a model is configured: `saip run` can start the agent straight away."""
+    settings = settings or load_settings()
+    return bool(load_manifest().get("done")) and bool(settings.llm.base_url and settings.llm.model)
+
+
+def ensure_config(roots: list[str] | None = None) -> Path:
+    """The private.toml in use, created from the template (only you can read it) when there is none yet."""
+    from .config_file import write_private
+    found = find_config()
+    if found:
+        return found
+    target = default_config_path()
+    write_private(target, TEMPLATE.format(base_url=_toml(""), model=_toml(""), roots=_toml(roots or [])))
+    update_manifest(config_created=str(target))
+    return target
+
+
+def aw_status(plat: Platform, aw: ActivityWatch) -> dict:
+    running = aw.ping()
+    checks = [r.__dict__ for r in check_data(plat, aw)] if running else []
+    return {"running": running, "installed": running or plat.activitywatcher_installed(),
+            "url": plat.activitywatch_url, "checks": checks,
+            "permission_hint": plat.permission_hint(),
+            "ok": running and all(c["status"] == "ok" for c in checks)}
+
+
+def aw_install(plat: Platform, aw: ActivityWatch) -> dict:
+    if not plat.activitywatcher_installed():
+        ok, msg = plat.install_activitywatch()
+        if not ok:
+            return {"ok": False, "detail": msg}
+        update_manifest(activitywatch_installed_by_saip=True)
+    return aw_start(plat, aw)
+
+
+def aw_start(plat: Platform, aw: ActivityWatch, wait_s: float = 30) -> dict:
+    if not aw.ping():
+        plat.start_activitywatch()
+        if not _wait_for(aw.ping, wait_s):
+            return {"ok": False, "detail": "started, but it is not answering on localhost:5600 yet; open it manually"}
+    return {"ok": True, "detail": "running"}
+
+
+def hook_status(plat: Platform, python: str | None = None) -> dict:
+    python = python or sys.executable
+    shell = plat.shell()
+    profile = plat.shell_profile(shell)
+    text = profile.read_text() if profile and profile.exists() else ""
+    return {"shell": shell, "profile": str(profile) if profile else None, "supported": profile is not None,
+            "installed": bool(text) and has_block(text) and python in text}
+
+
+def hook_install(plat: Platform, python: str | None = None) -> dict:
+    python = python or sys.executable
+    shell = plat.shell()
+    profile = plat.shell_profile(shell)
+    if profile is None:
+        return {"ok": False, "detail": f"no hook for the '{shell}' shell yet; zsh, bash and PowerShell are supported"}
+    created = not profile.exists()
+    action = install_block(profile, shell, python)
+    if created:
+        update_manifest(profiles_created=[str(profile)])
+    return {"ok": True, "detail": f"{action} in {profile}; open a new terminal tab for it to take effect"}
+
+
+def hook_remove(plat: Platform) -> dict:
+    profile = plat.shell_profile(plat.shell())
+    removed = bool(profile) and remove_block(profile)
+    return {"ok": True, "detail": f"removed from {profile}" if removed else "nothing to remove"}
+
+
+SUGGESTED_ROOTS = ("~/Developer", "~/code", "~/Code", "~/projects", "~/Projects", "~/src", "~/dev", "~/repos",
+                   "~/Documents/GitHub", "~/source/repos")
+
+
+def repo_overview(python: str | None = None) -> dict:
+    python = python or sys.executable
+    agent = load_settings().agent
+    states = repos_mod.inspect_all(repos_mod.discover(agent), python)
+    return {"roots": list(agent.watch_roots), "exclude": list(agent.exclude),
+            "suggestions": [p for p in dict.fromkeys(SUGGESTED_ROOTS) if Path(p).expanduser().is_dir()],
+            "repos": [{"path": repos_mod.tilde(s.path), "state": s.state, "detail": s.detail} for s in states],
+            "summary": repos_mod.summarise(states) if states else "no repositories found"}
+
+
+def repo_preview(folder: str, python: str | None = None) -> dict:
+    python = python or sys.executable
+    path = Path(folder).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(f"{folder} is not a folder")
+    agent = repos_mod.with_roots(load_settings().agent, [str(path)])
+    states = repos_mod.inspect_all(repos_mod.discover(agent), python)
+    return {"folder": repos_mod.tilde(path), "count": len(states),
+            "too_many": len(states) > repos_mod.MAX_REPOS_WITHOUT_ASKING,
+            "summary": repos_mod.summarise(states) if states else "no repositories found",
+            "repos": [{"path": repos_mod.tilde(s.path), "state": s.state, "detail": s.detail} for s in states[:200]]}
+
+
+def repo_add(folder: str, python: str | None = None) -> dict:
+    """Watch this folder and add the commit hook to every repository under it (what `saip repo add` does)."""
+    python = python or sys.executable
+    path = Path(folder).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(f"{folder} is not a folder")
+    cfg = ensure_config()
+    agent = load_settings(cfg).agent
+    shown = repos_mod.tilde(path)
+    same = lambda a, b: Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    roots = [r for r in agent.watch_roots if not same(r, path)] + [shown]
+    exclude = [e for e in agent.exclude if not same(e, path)]
+    states = repos_mod.inspect_all(repos_mod.discover(repos_mod.with_roots(agent, roots)), python)
+    repos_mod.set_config_list(cfg, "agent", "watch_roots", roots)
+    repos_mod.set_config_list(cfg, "agent", "exclude", exclude)
+    todo = [s.path for s in states if s.state in (githook.READY, githook.STALE)]
+    repos_mod.install_all(todo, python)
+    record_decisions(accept=[repos_mod.key(s.path) for s in states])
+    agent = load_settings(cfg).agent
+    update_manifest(hooked_repos=[str(r) for r in repos_mod.discover(agent) if githook.has_hook(r)])
+    return {"ok": True, "detail": f"{len(todo)} hooked under {shown}" if todo else f"nothing new to hook under {shown}"}
+
+
+def repo_remove(folder: str) -> dict:
+    """Stop watching this folder and take the commit hook out of its repositories (what `saip repo remove` does)."""
+    settings = load_settings()
+    if not settings.path:
+        raise ValueError("no private.toml yet")
+    agent = settings.agent
+    path = Path(folder).expanduser().resolve()
+    shown = repos_mod.tilde(path)
+    under = [r for r in repos_mod.discover(agent) if r == path or path in r.parents]
+    removed = sum(githook.remove(r) for r in under if githook.has_hook(r))
+    record_decisions(decline=[repos_mod.key(r) for r in under])
+    same = lambda a, b: Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    roots = [r for r in agent.watch_roots if not same(r, path)]
+    exclude = list(agent.exclude)
+    if len(roots) == len(agent.watch_roots):
+        exclude.append(shown)
+    repos_mod.set_config_list(settings.path, "agent", "watch_roots", roots)
+    repos_mod.set_config_list(settings.path, "agent", "exclude", exclude)
+    return {"ok": True, "detail": f"removed the hook from {removed} repositories under {shown}"}
+
+
+def finish(plat: Platform, python: str | None = None) -> dict:
+    """Mark setup as done. Refused until a model is configured."""
+    python = python or sys.executable
+    settings = load_settings()
+    if not (settings.llm.base_url and settings.llm.model):
+        return {"ok": False, "detail": "a model endpoint is required: test and save one first"}
+    update_manifest(done=True, platform=plat.name, python=python)
+    return {"ok": True}

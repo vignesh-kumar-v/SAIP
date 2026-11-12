@@ -59,6 +59,7 @@ class Tick:
     theta_trig: float
     idle_s: float | None         # seconds since the last key, click or scroll
     front: tuple | None          # identity of the window in front
+    features: dict | None = None  # {"bias": b, "items": {name: {"value", "weight", "push"}}} at this tick
 
 
 def score_now(trace: Trace, now: float, typed_text: str | None = None) -> Tick:
@@ -81,7 +82,16 @@ def score_now(trace: Trace, now: float, typed_text: str | None = None) -> Tick:
     idle = now - max(e["t"] + e["duration"] for e in inp) if inp else None
     win = trace.streams["window"][-1]["data"]
     return Tick(t, float(score[i]), stale or pause != SCORING, "stale" if stale else PAUSE_REASONS.get(pause),
-                weights.threshold, idle, (win.get("app"), win.get("title")))
+                weights.threshold, idle, (win.get("app"), win.get("title")), explain(series, weights, i))
+
+
+def explain(series, weights, i: int) -> dict:
+    """What pushed the score at tick i: each feature's value, its weight, and weight x value (in logit units)."""
+    items = {}
+    for name, w in weights.weights.items():
+        v = float(series.values[name][i])
+        items[name] = {"value": round(v, 4), "weight": w, "push": round(w * v, 4)}
+    return {"bias": weights.bias, "items": items}
 
 
 @dataclass
