@@ -20,7 +20,7 @@ from pathlib import Path
 MAX_CHATS = 20
 MAX_MESSAGE = 4000
 WEB_TOOLS = {"web_search": "A web search", "fetch_page": "A page that was opened"}
-ACTION_FIELDS = ("name", "title", "path", "content", "diff", "exists", "warning", "state", "detail")
+ACTION_FIELDS = ("name", "title", "path", "content", "diff", "exists", "warning", "after", "state", "detail")
 
 
 def _undo_write(undo: dict) -> tuple[bool, str]:
@@ -215,10 +215,26 @@ class Chats:
 
     @staticmethod
     def view(c: dict) -> dict:
-        """What the page may see: no background context, no model wire, no arguments or undo records."""
+        """What the page may see: no background context, no model wire, no arguments or undo records.
+        Each of the model's messages carries the checks of llm.checks: risky commands in its code, and a claim of
+        something its reply's actions do not show."""
+        from llm.checks import risky_commands, unbacked_claim
         items = []
+        approved: set[str] = set()                                # the actions of the reply so far
+        pending: set[str] = set()
         for i in c["items"]:
             row = {"id": i["id"], "kind": i["kind"], "at": i["at"], "text": i["text"]}
+            if i["kind"] == "user":
+                approved, pending = set(), set()
+            elif i["kind"] == "action":
+                state = i["action"]["state"]
+                if state == "approved":
+                    approved.add(i["action"]["name"])
+                elif state == "pending":
+                    pending.add(i["action"]["name"])
+            elif i["kind"] == "assistant":
+                row["risky"] = risky_commands(i["text"])
+                row["claim"] = unbacked_claim(i["text"], approved, pending)
             if i["kind"] == "tool":
                 row["tool"] = {k: i["tool"].get(k) for k in ("name", "label", "ok")}
             elif i["kind"] == "action":

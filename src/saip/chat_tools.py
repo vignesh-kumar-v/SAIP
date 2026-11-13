@@ -36,6 +36,10 @@ TEXT_EXTENSIONS = frozenset({".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx",
 READ_LIMIT, WRITE_LIMIT, OUTPUT_LIMIT = 60_000, 200_000, 12_000
 READ_TOOLS = ("read_screen", "activity_summary", "git_log", "git_diff", "read_file", "web_search", "fetch_page")
 APPROVE_TOOLS = ("copy_to_clipboard", "write_file")
+# Tools whose result is text the person did not write for the model: it can carry instructions meant to steer it.
+# An action proposed after any of them (anywhere in the chat, since the model still remembers it) has to be
+# confirmed on purpose.
+UNTRUSTED_TOOLS = frozenset({"read_file", "git_diff", "git_log", "read_screen", "web_search", "fetch_page"})
 
 
 # Never read or written, whatever the model says. Matched against the file name, ignoring case.
