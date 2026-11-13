@@ -91,7 +91,7 @@ export function ActivityWatchPanel() {
 
 // ---- the model ----
 export type ModelValues = { base_url: string; model: string; api_key_set: boolean };
-type TestResult = { ok: boolean; detail: string; hint?: string; seconds?: number };
+type TestResult = { ok: boolean; detail: string; hint?: string; seconds?: number; model?: string; models?: string[]; reasoning_effort?: string };
 
 const PRESETS = [
   { label: "vLLM", url: "http://localhost:8000/v1" },
@@ -104,6 +104,7 @@ export function ModelForm({ initial, onSaved }: { initial: ModelValues; onSaved?
   const [url, setUrl] = useState(initial.base_url);
   const [model, setModel] = useState(initial.model);
   const [key, setKey] = useState("");
+  const [models, setModels] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<TestResult | null>(null);
   const [saved, setSaved] = useState(Boolean(initial.base_url && initial.model));
@@ -115,13 +116,19 @@ export function ModelForm({ initial, onSaved }: { initial: ModelValues; onSaved?
     setBusy(true);
     setResult(null);
     try {
-      const r = await post<TestResult>("/api/setup/endpoint", { base_url: url, model, api_key: key || null });
+      const r = await post<TestResult>("/api/setup/endpoint", { base_url: url, model: model.trim(), api_key: key || null });
+      const resolvedModel = (r.model ?? model).trim();
+      if (r.model) setModel(r.model);
+      setModels(r.models && r.models.length > 1 ? r.models : []);
       setResult(r);
-      if (r.ok) {
-        await post("/api/settings", { llm: { base_url: url.trim(), model: model.trim(), api_key: key ? key : null } });
+      if (r.ok && resolvedModel) {
+        const llm: Record<string, unknown> = { base_url: url.trim(), model: resolvedModel, api_key: key ? key : null };
+        if (r.reasoning_effort) llm.reasoning_effort = r.reasoning_effort;
+        await post("/api/settings", { llm });
         setSaved(true);
         setKey("");
-        onSaved?.({ base_url: url.trim(), model: model.trim(), api_key_set: initial.api_key_set || !!key });
+        setModels([]);
+        onSaved?.({ base_url: url.trim(), model: resolvedModel, api_key_set: initial.api_key_set || !!key });
       }
     } catch (e: any) {
       setResult({ ok: false, detail: e.message, hint: "" });
@@ -132,25 +139,41 @@ export function ModelForm({ initial, onSaved }: { initial: ModelValues; onSaved?
   return (
     <div className="space-y-4">
       <Field label="Endpoint URL" hint="Any OpenAI-compatible server that returns log-probabilities.">
-        <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://host:8000/v1" spellCheck={false} autoComplete="off" />
+        <Input value={url} onChange={(e) => { setUrl(e.target.value); setModels([]); }} placeholder="http://host:8000/v1" spellCheck={false} autoComplete="off" />
       </Field>
       <div className="-mt-2 flex flex-wrap gap-1.5">
         {PRESETS.map((p) => (
-          <button key={p.label} onClick={() => setUrl(p.url)} className="rounded-full border border-line px-2.5 py-0.5 text-[11.5px] text-muted transition-colors hover:border-line-strong hover:text-ink">
+          <button key={p.label} onClick={() => { setUrl(p.url); setModels([]); }} className="rounded-full border border-line px-2.5 py-0.5 text-[11.5px] text-muted transition-colors hover:border-line-strong hover:text-ink">
             {p.label}
           </button>
         ))}
       </div>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Model name">
-          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="e.g. Qwen/Qwen2.5-7B-Instruct" spellCheck={false} autoComplete="off" />
+        <Field label="Model name" hint="Leave blank to auto-detect from /models.">
+          <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder="auto-detect from URL, or enter model ID" spellCheck={false} autoComplete="off" />
         </Field>
         <Field label="API key" hint={initial.api_key_set ? "A key is saved. Leave empty to keep it." : "Leave empty if the server needs none."}>
           <Input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={initial.api_key_set ? "•••••••• saved" : "optional"} autoComplete="new-password" />
         </Field>
       </div>
+      {models.length > 1 && (
+        <div className="-mt-1 flex flex-wrap gap-1.5">
+          {models.map((m) => (
+            <button
+              key={m}
+              onClick={() => setModel(m)}
+              className={cx(
+                "num rounded-full border px-2.5 py-0.5 text-[11.5px] transition-colors",
+                model.trim() === m ? "border-ink bg-ink text-canvas" : "border-line text-muted hover:border-line-strong hover:text-ink",
+              )}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="primary" busy={busy} disabled={!url.trim() || !model.trim()} onClick={testAndSave}>
+        <Button variant="primary" busy={busy} disabled={!url.trim()} onClick={testAndSave}>
           <KeyRound size={15} /> {saved && !dirty ? "Test again" : "Test and save"}
         </Button>
         <AnimatePresence mode="wait">

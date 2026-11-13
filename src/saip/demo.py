@@ -241,14 +241,18 @@ class DemoApi(Api):
         time.sleep(0.8)
         return {"ok": True, "detail": "running"}
 
-    def test_endpoint(self, base_url, model, api_key):
+    def test_endpoint(self, base_url, model="", api_key=None):
         time.sleep(0.9)
-        if not str(base_url).strip() or not str(model).strip():
-            return {"ok": False, "detail": "Enter the endpoint URL and the model name.", "hint": ""}
-        if "fail" in str(base_url):
+        base = str(base_url).strip()
+        model_name = str(model or "").strip()
+        if not base:
+            return {"ok": False, "detail": "Enter the endpoint URL.", "hint": ""}
+        if "fail" in base:
             return {"ok": False, "detail": "cannot reach http://fail: Connection refused",
                     "hint": "Could not reach that URL.", "seconds": 0.9}
-        return {"ok": True, "detail": f"{base_url} answered with log-probabilities (p_yes = 0.12)", "seconds": 0.42}
+        if not model_name:
+            model_name = "Qwen/Qwen2.5-7B-Instruct"
+        return {"ok": True, "detail": f"{base} answered with log-probabilities (p_yes = 0.12)", "seconds": 0.42, "model": model_name}
 
     def request_permission(self, perm_id):
         return {"ok": True}

@@ -350,3 +350,65 @@ def test_replay_runs_end_to_end_on_a_generated_day(tmp_path):
     assert "state-aware gate" in text and "AUROC" in text
     if len({r.state == "stuck" for r in rows}) == 2:
         assert set(fit_temps(rows)) == {"need", "accept"}
+
+
+def test_list_models_parses_openai_models_response(monkeypatch):
+    import io
+    import json
+    import urllib.request
+    from llm.client import list_models
+
+    captured = {}
+
+    class FakeResp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=10.0):
+        captured["url"] = req.full_url
+        captured["auth"] = req.headers.get("Authorization")
+        payload = {"data": [{"id": "model-a"}, {"id": "model-b"}, {"id": "model-a"}]}
+        return FakeResp(json.dumps(payload).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert list_models("http://host:8000/v1/", api_key="secret") == ["model-a", "model-b"]
+    assert captured == {"url": "http://host:8000/v1/models", "auth": "Bearer secret"}
+
+
+def test_server_test_endpoint_auto_detects_single_and_multiple_models(monkeypatch):
+    from saip import setup
+    from saip.server import Api
+
+    api = Api(bus=None, plat=type("P", (), {"name": "darwin"})())
+
+    # Single model -> auto-selects and checks endpoint
+    monkeypatch.setattr("llm.client.list_models", lambda *a, **kw: ["prism-festinalente/Qwen3-8B-PRISM"])
+    monkeypatch.setattr(setup, "check_endpoint", lambda trial: setup.Result("LLM endpoint", "ok", f"ok {trial.llm.model}"))
+    res = api.test_endpoint("http://host:8000/v1", "", "k")
+    assert res["ok"] is True
+    assert res["model"] == "prism-festinalente/Qwen3-8B-PRISM"
+    assert res["models"] == ["prism-festinalente/Qwen3-8B-PRISM"]
+
+    # Multiple models -> returns choices without probing
+    monkeypatch.setattr("llm.client.list_models", lambda *a, **kw: ["m1", "m2"])
+    res_multi = api.test_endpoint("http://host:8000/v1", "", None)
+    assert res_multi["ok"] is False
+    assert res_multi["models"] == ["m1", "m2"]
+
+
+def test_server_test_endpoint_retries_with_reasoning_effort_none(monkeypatch):
+    from saip import setup
+    from saip.server import Api, _classify
+
+    api = Api(bus=None, plat=type("P", (), {"name": "darwin"})())
+
+    def fake_check(trial):
+        if trial.llm.reasoning_effort == "none":
+            return setup.Result("LLM endpoint", "ok", "ok")
+        return setup.Result("LLM endpoint", "failed", "neither 'yes' nor 'no' appears among the top log-probabilities of the first token")
+
+    monkeypatch.setattr(setup, "check_endpoint", fake_check)
+    res = api.test_endpoint("http://host:8000/v1", "Qwen/Qwen3-8B-PRISM", None)
+    assert res["ok"] is True
+    assert res["reasoning_effort"] == "none"
+    assert "thinking mode" in _classify("neither 'yes' nor 'no' appears among the top log-probabilities")

@@ -138,6 +138,8 @@ def _classify(detail: str) -> str:
         return "The endpoint refused the API key."
     if "404" in d or "not found" in d or "model" in d and "exist" in d:
         return "The endpoint answered, but not for that model name or path (does the URL end in /v1?)."
+    if "neither 'yes' nor 'no'" in d:
+        return "The endpoint returned log-probabilities, but not a yes/no first token (the model may be in thinking mode)."
     if "logprob" in d or "log-prob" in d:
         return "The endpoint answered without log-probabilities; SAIP needs them to read the model's confidence."
     if "timed out" in d or "timeout" in d:
@@ -490,20 +492,50 @@ class Api:
             return setup.aw_start(self.plat, self.aw)
         raise ApiError(400, "expected action install or start")
 
-    def test_endpoint(self, base_url: str, model: str, api_key: str | None) -> dict:
+    def test_endpoint(self, base_url: str, model: str = "", api_key: str | None = None) -> dict:
+        from llm.client import LLMError, list_models
         from llm.config import load_settings
         from . import setup
         s = load_settings()
         key = api_key if api_key else s.llm.api_key
-        if not str(base_url).strip() or not str(model).strip():
-            return {"ok": False, "detail": "Enter the endpoint URL and the model name.", "hint": ""}
-        trial = replace(s, llm=replace(s.llm, base_url=str(base_url).strip(), model=str(model).strip(), api_key=key or ""))
+        base = str(base_url).strip()
+        model_name = str(model or "").strip()
+        if not base:
+            return {"ok": False, "detail": "Enter the endpoint URL.", "hint": ""}
+        models: list[str] | None = None
+        if not model_name:
+            try:
+                models = list_models(base, key or "", timeout_s=min(s.llm.timeout_s, 10.0))
+            except LLMError as e:
+                detail = str(e)
+                return {"ok": False, "detail": detail, "hint": _classify(detail)}
+            if not models:
+                return {"ok": False, "detail": "The endpoint returned no models at /models. Enter the model name manually.",
+                        "hint": "No models returned."}
+            if len(models) > 1:
+                return {"ok": False,
+                        "detail": f"Found {len(models)} models at {base}/models. Pick one below and click Test and save.",
+                        "hint": "Multiple models available.", "models": models}
+            model_name = models[0]
+        trial = replace(s, llm=replace(s.llm, base_url=base, model=model_name, api_key=key or ""))
         began = time.time()
         r = setup.check_endpoint(trial)
+        auto_reasoning: str | None = None
+        if r.status != "ok" and "neither 'yes' nor 'no'" in r.detail.lower() and not trial.llm.reasoning_effort:
+            trial_no_think = replace(trial, llm=replace(trial.llm, reasoning_effort="none"))
+            r_no_think = setup.check_endpoint(trial_no_think)
+            if r_no_think.status == "ok":
+                r = r_no_think
+                auto_reasoning = "none"
         took = round(time.time() - began, 2)
-        if r.status == "ok":
-            return {"ok": True, "detail": r.detail, "seconds": took}
-        return {"ok": False, "detail": r.detail, "hint": _classify(r.detail), "seconds": took}
+        out: dict = {"ok": r.status == "ok", "detail": r.detail, "seconds": took, "model": model_name}
+        if auto_reasoning is not None:
+            out["reasoning_effort"] = auto_reasoning
+        if models is not None:
+            out["models"] = models
+        if r.status != "ok":
+            out["hint"] = _classify(r.detail)
+        return out
 
     def request_permission(self, perm_id: str) -> dict:
         from . import permissions
@@ -759,7 +791,7 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
             routes = {
                 "/api/settings": lambda: api.save_settings(b),
                 "/api/setup/aw": lambda: api.aw_action(*_need(body, "action")),
-                "/api/setup/endpoint": lambda: api.test_endpoint(*_need(body, "base_url", "model"), b.get("api_key")),
+                "/api/setup/endpoint": lambda: api.test_endpoint(*_need(body, "base_url"), b.get("model", ""), b.get("api_key")),
                 "/api/setup/permissions": lambda: api.request_permission(*_need(body, "id")),
                 "/api/setup/keytest": lambda: api.key_test(b.get("seconds", 6)),
                 "/api/setup/hook": lambda: api.hook_action(*_need(body, "action")),
