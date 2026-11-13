@@ -412,3 +412,71 @@ def test_server_test_endpoint_retries_with_reasoning_effort_none(monkeypatch):
     assert res["ok"] is True
     assert res["reasoning_effort"] == "none"
     assert "thinking mode" in _classify("neither 'yes' nor 'no' appears among the top log-probabilities")
+
+
+def test_server_chat_api_methods():
+    from collections import deque
+    from types import SimpleNamespace
+    from saip.chats import Chats
+    from saip.server import Api, ApiError
+
+    rt = SimpleNamespace(
+        chats=Chats(),
+        client=None,
+        last_context="Default activity.",
+        look=lambda: None,
+        snapshot_context=lambda: "Snapshot activity.",
+        inspector=deque(),
+        running=True,
+    )
+    api = Api(bus=None, plat=type("P", (), {"name": "darwin"})(), runtime=rt)
+
+    # 1. chat_new with context and offer
+    c1 = api.chat_new(title="Custom Title", context="Activity in VS Code", offer="Would you like help with debugging?")
+    assert c1["title"] == "Custom Title"
+    assert c1["context"] == "Activity in VS Code"
+    assert len(c1["items"]) == 1
+    assert c1["items"][0]["kind"] == "assistant"
+    assert c1["items"][0]["text"] == "Would you like help with debugging?"
+
+    # chat_new with offer only (derives title)
+    c2 = api.chat_new(offer="Need assistance with tests?")
+    assert c2["title"] == "Need assistance with tests?"
+    assert c2["context"] == "Snapshot activity."
+    assert c2["items"][0]["text"] == "Need assistance with tests?"
+
+    # 2. chat_rename
+    res_rename = api.chat_rename(c1["id"], "Renamed Conversation")
+    assert res_rename["ok"] is True
+    assert res_rename["chat"]["title"] == "Renamed Conversation"
+    assert any(ch["id"] == c1["id"] and ch["title"] == "Renamed Conversation" for ch in res_rename["chats"])
+
+    # chat_rename validation
+    with pytest.raises(ApiError) as exc_empty:
+        api.chat_rename(c1["id"], "   ")
+    assert exc_empty.value.code == 400
+
+    with pytest.raises(ApiError) as exc_404:
+        api.chat_rename(999999, "Valid Title")
+    assert exc_404.value.code == 404
+
+    # 3. chat_stop
+    assert api.chat_stop(c1["id"]) == {"ok": True}
+
+    # 4. inspector_feedback
+    entry1 = {"time": 100.5, "decision": "offer", "context": "ctx1"}
+    entry2 = {"time": 200.0, "decision": "quiet", "context": "ctx2"}
+    rt.inspector.append(entry1)
+    rt.inspector.append(entry2)
+
+    fb_res = api.inspector_feedback(100.5, "up")
+    assert fb_res == {"ok": True, "vote": "up"}
+    assert entry1.get("feedback") == "up"
+
+    fb_clear = api.inspector_feedback(100.5, None)
+    assert fb_clear == {"ok": True, "vote": None}
+    assert entry1.get("feedback") is None
+
+    with pytest.raises(ApiError) as exc_invalid_vote:
+        api.inspector_feedback(100.5, "invalid")
+    assert exc_invalid_vote.value.code == 400

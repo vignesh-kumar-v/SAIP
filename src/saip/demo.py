@@ -220,6 +220,15 @@ class DemoApi(Api):
         self._record(cid, wire, None, [], {"events": [], "pending": None, "text": words})
         return self.chat_get(cid)
 
+    def chat_rename(self, cid, title):
+        return super().chat_rename(cid, title)
+
+    def chat_stop(self, cid=None):
+        return super().chat_stop(cid)
+
+    def inspector_feedback(self, entry_time, vote):
+        return super().inspector_feedback(entry_time, vote)
+
     # ---- changing (in memory only) ----
     def save_settings(self, body: dict) -> dict:
         for section, table in (body or {}).items():

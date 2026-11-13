@@ -1,8 +1,9 @@
-import { ArrowUp, Check, MessageSquarePlus, Reply, Trash2, X } from "lucide-react";
+import * as Menu from "@radix-ui/react-dropdown-menu";
+import { ArrowUp, Check, Eye, MessageSquarePlus, MoreHorizontal, Pencil, Reply, Search, Square, Trash2, X } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { ActionCard, AssistantBubble, ConfirmDelete, ConfirmRewind, ToolLine, UserBubble, itemsOf, toolsSummary, withQuote } from "../components/ChatParts";
-import { Button, Card, Empty, Mark, Spinner, cx } from "../components/ui";
+import { Button, Card, Empty, Mark, cx } from "../components/ui";
 import { ApiError, get, post } from "../lib/api";
 import { ago } from "../lib/format";
 import { navigate } from "../lib/router";
@@ -14,6 +15,18 @@ type Confirm = { item: number; message?: string; text: string; preview: RewindPr
 type Listing = { chats: { id: number; title: string; created: number; count: number; last: string }[]; available: boolean };
 
 const STARTERS = ["Help me think through what to do next", "Explain what I'm looking at", "What am I missing?"];
+
+function renderMasked(text: string) {
+  return text.split(/(\[hidden\])/g).map((chunk, idx) =>
+    chunk === "[hidden]" ? (
+      <span key={idx} className="rounded bg-stuck/20 px-1 py-0.5 font-semibold text-stuck">
+        [hidden]
+      </span>
+    ) : (
+      chunk
+    )
+  );
+}
 
 export function Chat() {
   const helpCount = useLive((s) => s.log.filter((e) => e.kind === "help").length);
@@ -33,8 +46,13 @@ export function Chat() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [toDelete, setToDelete] = useState<number[] | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [search, setSearch] = useState("");
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renamingTitle, setRenamingTitle] = useState("");
+  const [showContext, setShowContext] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const open = async (id: number) => {
     setError(null);
@@ -58,6 +76,37 @@ export function Chat() {
         ? "This SAIP is older than the page: stop it (Ctrl-C) and start it again with `saip run`."
         : e instanceof ApiError ? e.message : String(e));
     }
+  };
+
+  const stop = async () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    if (current) {
+      post("/api/chats/stop", { id: current.id }).catch(() => {});
+    }
+    setSending(false);
+    setActing(null);
+    setRewinding(false);
+  };
+
+  const saveRename = async (id: number, title: string) => {
+    const trimmed = title.trim();
+    if (!trimmed) {
+      setRenamingId(null);
+      return;
+    }
+    try {
+      const res = await post<{ ok: boolean; chat: Chat; chats: Listing["chats"] }>("/api/chats/rename", { id, title: trimmed });
+      if (current?.id === id) {
+        setCurrent((prev) => (prev ? { ...prev, title: res.chat.title } : null));
+      }
+      list.reload();
+    } catch (e: any) {
+      setError(e.message);
+    }
+    setRenamingId(null);
   };
 
   useEffect(() => {
@@ -104,36 +153,68 @@ export function Chat() {
       items: chat.items ? [...chat.items, { id: Math.max(0, ...shown.map((i) => i.id)) + 1, kind: "user", at: now, text: m }] : undefined,
       messages: [...chat.messages, { role: "user", text: m, at: now }],
     });
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      setCurrent(await post<Chat>(`/api/chats/${chat.id}`, { message: m }));
+      const res = await post<Chat>(`/api/chats/${chat.id}`, { message: m }, controller.signal);
+      setCurrent((prev) => ({
+        ...res,
+        context: res.context ?? prev?.context,
+        screen: res.screen ?? prev?.screen,
+      }));
       list.reload();
     } catch (e: any) {
-      setError(e.message);
+      if (e.name !== "AbortError") {
+        setError(e.message);
+      }
+    } finally {
+      abortRef.current = null;
+      setSending(false);
+      box.current?.focus();
     }
-    setSending(false);
-    box.current?.focus();
   };
 
   const decide = async (item: ChatItem, approve: boolean) => {
     if (!current || working) return;
     setActing(item.id);
     setError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      setCurrent(await post<Chat>(`/api/chats/${current.id}/actions/${item.id}`, { approve }));
+      const res = await post<Chat>(`/api/chats/${current.id}/actions/${item.id}`, { approve }, controller.signal);
+      setCurrent((prev) => ({
+        ...res,
+        context: res.context ?? prev?.context,
+        screen: res.screen ?? prev?.screen,
+      }));
       list.reload();
     } catch (e: any) {
-      setError(e.message);
+      if (e.name !== "AbortError") {
+        setError(e.message);
+      }
+    } finally {
+      abortRef.current = null;
+      setActing(null);
     }
-    setActing(null);
   };
 
   const doRewind = async (itemId: number, text: string, message?: string) => {
     if (!current) return;
     setRewinding(true);
     setError(null);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const r = await post<RewindResult>(`/api/chats/${current.id}/rewind`, message === undefined ? { item: itemId } : { item: itemId, message });
-      setCurrent(r.chat);
+      const r = await post<RewindResult>(
+        `/api/chats/${current.id}/rewind`,
+        message === undefined ? { item: itemId } : { item: itemId, message },
+        controller.signal
+      );
+      setCurrent((prev) => ({
+        ...r.chat,
+        context: r.chat.context ?? prev?.context,
+        screen: r.chat.screen ?? prev?.screen,
+      }));
       setEditing(null);
       setConfirm(null);
       if (message === undefined) {
@@ -144,9 +225,13 @@ export function Chat() {
       list.reload();
     } catch (e: any) {
       setConfirm(null);
-      setError(e.message);
+      if (e.name !== "AbortError") {
+        setError(e.message);
+      }
+    } finally {
+      abortRef.current = null;
+      setRewinding(false);
     }
-    setRewinding(false);
   };
   // Look at what a rewind would do first; an edit that drops nothing else goes straight through.
   const startRewind = async (item: ChatItem, message?: string) => {
@@ -203,6 +288,14 @@ export function Chat() {
 
   const available = list.data?.available ?? true;
 
+  const filteredChats = search.trim()
+    ? chats.filter(
+        (c) =>
+          c.title.toLowerCase().includes(search.trim().toLowerCase()) ||
+          (c.last && c.last.toLowerCase().includes(search.trim().toLowerCase()))
+      )
+    : chats;
+
   return (
     <div className="grid h-[calc(100vh-7rem)] min-h-[460px] gap-5 lg:grid-cols-[260px_1fr]">
       <Card className="hidden min-h-0 flex-col p-2 lg:flex">
@@ -216,6 +309,29 @@ export function Chat() {
             </Button>
           )}
         </div>
+        {chats.length > 0 && !selecting && (
+          <div className="relative mx-1 mb-2">
+            <Search size={13} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-faint" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search chats…"
+              aria-label="Search chats"
+              className="h-8 w-full rounded-lg border border-line bg-canvas pl-7 pr-7 text-[12.5px] text-ink placeholder:text-faint focus:border-flow focus:outline-none"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                aria-label="Clear search"
+                className="absolute top-1/2 right-2 -translate-y-1/2 text-faint hover:text-ink"
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        )}
         {selecting && (
           <div className="flex items-center justify-between px-3 pb-1.5 text-[12px]">
             <span className="text-faint">{selected.size} selected</span>
@@ -229,9 +345,34 @@ export function Chat() {
         )}
         {error && !current && <p className="px-3 pb-2 text-[12px] text-stuck">{error}</p>}
         {list.data?.chats.length === 0 && <p className="px-3 py-2 text-[12.5px] text-faint">Conversations start when you press “Help me”, or here.</p>}
+        {filteredChats.length === 0 && search.trim() && <p className="px-3 py-2 text-[12.5px] text-faint">No matching chats.</p>}
         <ul className="scroll-thin min-h-0 flex-1 space-y-0.5 overflow-auto">
-          {chats.map((c) => {
+          {filteredChats.map((c) => {
             const on = selected.has(c.id);
+            if (renamingId === c.id) {
+              return (
+                <li key={c.id} className="px-1 py-1">
+                  <div className="flex items-center gap-1.5 rounded-xl border border-flow bg-canvas px-2.5 py-1.5 shadow-sm">
+                    <input
+                      autoFocus
+                      value={renamingTitle}
+                      onChange={(e) => setRenamingTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          saveRename(c.id, renamingTitle);
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          setRenamingId(null);
+                        }
+                      }}
+                      onBlur={() => saveRename(c.id, renamingTitle)}
+                      className="min-w-0 flex-1 bg-transparent text-[13px] text-ink focus:outline-none"
+                    />
+                  </div>
+                </li>
+              );
+            }
             return (
               <li key={c.id} className="group relative">
                 <button
@@ -256,14 +397,40 @@ export function Chat() {
                   </span>
                 </button>
                 {!selecting && (
-                  <button
-                    onClick={() => setToDelete([c.id])}
-                    disabled={busyWith([c.id])}
-                    aria-label={`Delete “${c.title}”`}
-                    className="absolute top-1/2 right-1.5 -translate-y-1/2 rounded-lg p-1.5 text-faint opacity-0 transition-opacity group-hover:opacity-100 hover:text-danger focus-visible:opacity-100 disabled:pointer-events-none pointer-coarse:opacity-100"
-                  >
-                    <Trash2 size={14} />
-                  </button>
+                  <Menu.Root>
+                    <Menu.Trigger asChild>
+                      <button
+                        aria-label={`Actions for “${c.title}”`}
+                        className={cx(
+                          "absolute top-1/2 right-1.5 -translate-y-1/2 rounded-lg p-1.5 text-faint transition-opacity hover:text-ink focus-visible:opacity-100 data-[state=open]:opacity-100",
+                          current?.id === c.id ? "opacity-80" : "opacity-50 group-hover:opacity-100",
+                        )}
+                      >
+                        <MoreHorizontal size={14} />
+                      </button>
+                    </Menu.Trigger>
+                    <Menu.Portal>
+                      <Menu.Content side="right" align="start" sideOffset={6} className="z-50 min-w-[140px] rounded-xl border border-line bg-raised p-1 text-[13px] shadow-2xl">
+                        <Menu.Item
+                          disabled={busyWith([c.id])}
+                          onSelect={() => {
+                            setRenamingId(c.id);
+                            setRenamingTitle(c.title);
+                          }}
+                          className="flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-ink outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-canvas"
+                        >
+                          <Pencil size={14} /> Rename
+                        </Menu.Item>
+                        <Menu.Item
+                          disabled={busyWith([c.id])}
+                          onSelect={() => setToDelete([c.id])}
+                          className="flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-danger outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-canvas"
+                        >
+                          <Trash2 size={14} /> Delete
+                        </Menu.Item>
+                      </Menu.Content>
+                    </Menu.Portal>
+                  </Menu.Root>
                 )}
               </li>
             );
@@ -313,12 +480,85 @@ export function Chat() {
               <Mark size={20} />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[14px] font-medium">{current.title}</div>
-                <div className="text-[11.5px] text-faint">
-                  started {ago(Date.now() / 1000 - current.created)} · {current.has_screen ? "sees your screen text" : "activity summary only"}
-                  {toolsSummary(current.tools ?? []) && <> · {toolsSummary(current.tools ?? [])}</>}
+                <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11.5px] text-faint">
+                  <span>started {ago(Date.now() / 1000 - current.created)}</span>
+                  <span>·</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowContext((v) => !v)}
+                    aria-expanded={showContext}
+                    aria-label="What SAIP sees"
+                    className={cx(
+                      "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors focus:outline-none",
+                      showContext
+                        ? "border-flow bg-flow/10 text-flow"
+                        : "border-line bg-canvas text-muted hover:border-line-strong hover:text-ink"
+                    )}
+                  >
+                    <Eye size={12} />
+                    <span>{current.has_screen ? "sees your screen text" : "activity summary only"}</span>
+                    <span className="opacity-70">· What SAIP sees</span>
+                  </button>
+                  {toolsSummary(current.tools ?? []) && <span>· {toolsSummary(current.tools ?? [])}</span>}
                 </div>
               </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busyWith([current.id])}
+                onClick={() => setToDelete([current.id])}
+                aria-label={`Delete “${current.title}”`}
+                className="text-muted hover:text-danger"
+              >
+                <Trash2 size={14} />
+              </Button>
             </header>
+            <AnimatePresence>
+              {showContext && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="overflow-hidden border-b border-line bg-raised/40 px-5 py-3"
+                >
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[12px] font-medium text-ink">What SAIP sees</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowContext(false)}
+                        className="text-[11.5px] text-faint hover:text-ink"
+                      >
+                        Close
+                      </button>
+                    </div>
+                    {!current.context && !current.screen ? (
+                      <p className="text-[12px] text-faint italic">No activity snapshot was captured yet.</p>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {current.context && (
+                          <div>
+                            <div className="mb-1 text-[11px] font-medium text-faint">Activity snapshot</div>
+                            <pre className="num scroll-thin max-h-36 overflow-auto rounded-lg border border-line bg-canvas p-2.5 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted">
+                              {renderMasked(current.context)}
+                            </pre>
+                          </div>
+                        )}
+                        {current.screen && (
+                          <div>
+                            <div className="mb-1 text-[11px] font-medium text-faint">Screen text</div>
+                            <pre className="num scroll-thin max-h-36 overflow-auto rounded-lg border border-line bg-canvas p-2.5 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted">
+                              {renderMasked(current.screen)}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
             <div className="scroll-thin flex-1 space-y-4 overflow-auto px-5 py-5">
               <AnimatePresence initial={false}>
                 {items.map((it) => (
@@ -395,9 +635,21 @@ export function Chat() {
                 placeholder={quote ? "Write your reply" : "Ask something, or say where you're stuck"}
                 className="max-h-40 min-h-[42px] flex-1 resize-none rounded-xl border border-line bg-canvas px-3.5 py-2.5 text-[14.5px] text-ink placeholder:text-faint focus:border-flow focus:outline-none disabled:opacity-50"
               />
-              <Button type="submit" variant="primary" disabled={!text.trim() || working || pending} aria-label="Send" className="h-[42px] w-[42px] px-0">
-                {working ? <Spinner /> : <ArrowUp size={18} />}
-              </Button>
+              {working ? (
+                <Button
+                  type="button"
+                  variant="subtle"
+                  onClick={stop}
+                  aria-label="Stop generating"
+                  className="h-[42px] w-[42px] px-0 text-danger hover:bg-danger/10"
+                >
+                  <Square size={16} className="fill-current" />
+                </Button>
+              ) : (
+                <Button type="submit" variant="primary" disabled={!text.trim() || working || pending} aria-label="Send" className="h-[42px] w-[42px] px-0">
+                  <ArrowUp size={18} />
+                </Button>
+              )}
               {pending && <p className="w-full px-1 text-[12px] text-faint">Approve or decline the proposed action first.</p>}
             </form>
             <ConfirmRewind

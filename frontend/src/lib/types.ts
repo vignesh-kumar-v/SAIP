@@ -185,9 +185,31 @@ export type InspectorEntry = DecisionRow & {
   typed: boolean;
   offer: { message: string; task: string; generated: boolean } | null;
   screen: { app: string | null; text: string } | null;
+  feedback?: "up" | "down" | null;
 };
 
 export type RepoRow = { path: string; state: string; detail: string };
+
+export const GATE_PRESETS = [
+  {
+    id: "quiet",
+    name: "Quiet",
+    caption: "High precision, fewest false alarms",
+    gate: { c0: 1.0, m0: 1.2, alpha: 1.1, beta: 0.69 },
+  },
+  {
+    id: "balanced",
+    name: "Balanced",
+    caption: "Best F1 trade-off",
+    gate: { c0: 1.0, m0: 2.0, alpha: 1.1, beta: 0.69 },
+  },
+  {
+    id: "eager",
+    name: "Eager",
+    caption: "High recall, catches more stuck moments",
+    gate: { c0: 1.0, m0: 4.5, alpha: 1.1, beta: 0.69 },
+  },
+] as const;
 
 // ---- chat ----
 export type ActionState = "pending" | "approved" | "declined" | "undone" | "failed";
@@ -212,7 +234,7 @@ export type ChatItem = {
   action?: ChatAction;
 };
 export type ChatMessage = { role: "user" | "assistant"; text: string; at: number };
-export type ChatView = {
+export type ChatFull = {
   id: number;
   title: string;
   created: number;
@@ -220,6 +242,9 @@ export type ChatView = {
   tools?: string[];
   items?: ChatItem[];
   messages: ChatMessage[];
+  context?: string;
+  screen?: string;
 };
+export type ChatView = ChatFull;
 export type RewindPreview = { item: number; drops: number; undo: { path: string; effect: "restore" | "delete" }[]; cannot_undo: string[] };
 export type RewindResult = { chat: ChatView; undone: string[]; skipped: string[] };

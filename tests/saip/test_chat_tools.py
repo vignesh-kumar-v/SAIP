@@ -510,3 +510,103 @@ def test_tool_output_masks_secret_values(line):
 def test_tool_output_leaves_ordinary_code_alone(line):
     from saip.chat_tools import mask_output
     assert mask_output(line) == line
+
+
+def test_repo_resolves_nested_name_and_context_without_guessing_first(tmp_path, monkeypatch):
+    import types
+    (tmp_path / "automation" / "jobscraper" / ".git").mkdir(parents=True)
+    (tmp_path / "coursework" / "SAIP" / ".git").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    rt = types.SimpleNamespace(last_context="Working in SAIP on chat_tools.py")
+    box = Toolbox(settings(tmp_path), runtime=rt)
+
+    # Omitting repo uses last_context to pick SAIP instead of jobscraper
+    assert box._repo({}) == (tmp_path / "coursework" / "SAIP")
+    # Passing nested repo name "SAIP" resolves to the nested repo
+    assert box._repo({"repo": "SAIP"}) == (tmp_path / "coursework" / "SAIP")
+
+    # Without context or cwd match, multiple repos raise a clear list instead of picking found[0]
+    rt.last_context = "Browsing docs"
+    out = box.run("git_log", {})
+    assert out["kind"] == "error" and "multiple repositories" in out["result"] and "SAIP" in out["result"]
+
+    # Normalized separator match (job-scraper -> jobscraper) and fuzzy typo suggestion (siap -> SAIP)
+    assert box._repo({"repo": "job-scraper"}) == (tmp_path / "automation" / "jobscraper")
+    typo = box.run("git_log", {"repo": "siap"})
+    assert typo["kind"] == "error" and "Did you mean: SAIP?" in typo["result"]
+
+
+def test_list_repos_status_files_and_search_text(tmp_path):
+    import subprocess
+    repo = tmp_path / "demo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "node_modules" / "pkg").mkdir(parents=True)
+    (repo / "node_modules" / "pkg" / "index.js").write_text("needle", encoding="utf-8")
+    (repo / ".env").write_text("SECRET=needle", encoding="utf-8")
+    (repo / "src" / "app.py").write_text("def greet():\n    return 'needle'\n", encoding="utf-8")
+    (repo / "README.md").write_text("hello world\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+
+    box = Toolbox(settings(tmp_path))
+
+    repos_out = box.run("list_repos", {})
+    assert repos_out["kind"] == "read" and "demo" in repos_out["result"]
+
+    status_out = box.run("git_status", {"repo": "demo"})
+    assert status_out["kind"] == "read" and "README.md" in status_out["result"]
+
+    files_out = box.run("list_files", {"path": "demo"})
+    assert files_out["kind"] == "read"
+    assert "src/app.py" in files_out["result"] and "README.md" in files_out["result"]
+    assert ".env" not in files_out["result"] and "node_modules" not in files_out["result"]
+
+    search_out = box.run("search_text", {"query": "needle", "path": "demo"})
+    assert search_out["kind"] == "read"
+    assert "src/app.py:2:" in search_out["result"]
+    assert ".env" not in search_out["result"] and "node_modules" not in search_out["result"]
+
+
+def test_edit_file_preview_perform_and_undo(tmp_path):
+    from saip.chat_tools import undo_write
+
+    target = tmp_path / "notes.py"
+    target.write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+    box = Toolbox(settings(tmp_path))
+
+    # Ambiguous or missing old_text is rejected cleanly
+    missing = box.run("edit_file", {"path": "notes.py", "old_text": "nope", "new_text": "x"})
+    assert missing["kind"] == "error" and "not found" in missing["result"]
+
+    # Valid edit returns approve preview with diff, performs edit, and supports undo
+    req = box.run("edit_file", {"path": "notes.py", "old_text": "b = 2", "new_text": "b = 20"})
+    assert req["kind"] == "approve" and "-b = 2" in req["preview"]["diff"] and "+b = 20" in req["preview"]["diff"]
+
+    done = box.perform("edit_file", {"path": "notes.py", "old_text": "b = 2", "new_text": "b = 20"})
+    assert done["ok"] is True and target.read_text(encoding="utf-8") == "a = 1\nb = 20\nc = 3\n"
+
+    ok, _ = undo_write(done["undo"])
+    assert ok is True and target.read_text(encoding="utf-8") == "a = 1\nb = 2\nc = 3\n"
+
+
+def test_read_and_edit_resolve_nested_repo_prefixed_paths(tmp_path):
+    import subprocess
+    repo = tmp_path / "coursework" / "SAIP"
+    repo.mkdir(parents=True)
+    (repo / "README.md").write_text("# SAIP\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+
+    box = Toolbox(settings(tmp_path))
+    read_out = box.run("read_file", {"path": "SAIP/README.md"})
+    assert read_out["kind"] == "read" and "# SAIP" in read_out["result"]
+
+    edit_out = box.run("edit_file", {"path": "SAIP/README.md", "old_text": "# SAIP", "new_text": "# SAIP v2"})
+    assert edit_out["kind"] == "approve" and "+# SAIP v2" in edit_out["preview"]["diff"]
+
+    (repo / "docs").mkdir()
+    (repo / "docs" / "guide.md").write_text("hi", encoding="utf-8")
+    sub_list = box.run("list_files", {"path": "SAIP/docs"})
+    assert sub_list["kind"] == "read" and "guide.md" in sub_list["result"]
+
+    top_list = box.run("list_files", {"path": "SAIP"})
+    assert top_list["result"].splitlines()[0] == "README.md"

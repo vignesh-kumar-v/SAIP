@@ -20,11 +20,12 @@ async function handle<T>(r: Response): Promise<T> {
   return body as T;
 }
 
-export const get = <T>(path: string) => fetch(path, { cache: "no-store" }).then((r) => handle<T>(r));
+export const get = <T>(path: string, signal?: AbortSignal) => fetch(path, { cache: "no-store", signal }).then((r) => handle<T>(r));
 
-export const post = <T>(path: string, body: unknown = {}) =>
+export const post = <T>(path: string, body: unknown = {}, signal?: AbortSignal) =>
   fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   }).then((r) => handle<T>(r));

@@ -8,7 +8,7 @@ describe("chat markdown", () => {
     const code = b[1] as { lang: string; text: string };
     expect(code.lang).toBe("python");
     expect(code.text).toBe("import time\nprint(1)");
-    expect((b[2] as { items: string[] }).items).toEqual(["one", "two"]);
+    expect((b[2] as { items: { text: string }[] }).items).toEqual([{ text: "one" }, { text: "two" }]);
   });
 
   it("ends an unclosed fence at the end of the text instead of swallowing nothing", () => {
@@ -20,6 +20,24 @@ describe("chat markdown", () => {
     const b = parseBlocks("<img src=x onerror=alert(1)> [click](javascript:alert(1))");
     expect(b).toHaveLength(1);
     expect(b[0].t).toBe("p");
+  });
+
+  it("parses markdown tables cleanly", () => {
+    const b = parseBlocks("| Repo | Branch | Path |\n|---|---|---|\n| SAIP | main | ~/Developer/SAIP |");
+    expect(b).toEqual([{
+      t: "table",
+      headers: ["Repo", "Branch", "Path"],
+      rows: [["SAIP", "main", "~/Developer/SAIP"]],
+    }]);
+  });
+
+  it("parses horizontal rules, nested lists, and task checkboxes", () => {
+    const b = parseBlocks("---\n- [x] Done\n  - nested item\n- [ ] Todo");
+    expect(b.map((x) => x.t)).toEqual(["hr", "ul"]);
+    expect((b[1] as { items: unknown[] }).items).toEqual([
+      { text: "Done", checked: true, sub: { ordered: false, items: [{ text: "nested item" }] } },
+      { text: "Todo", checked: false },
+    ]);
   });
 });
 
