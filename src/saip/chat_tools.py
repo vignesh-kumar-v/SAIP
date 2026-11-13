@@ -5,24 +5,77 @@ Writing tools (the clipboard, saving a file) only ever return a preview here; `p
 `undo_write` puts a file back if it has not changed since. Files are reached only inside the watched folders, never
 through a symlink that leaves them, never inside `.git`, and only plain-text kinds. A tool's failure is plain words
 given to the model and to you, never an exception.
+
+Because the model may be small, local and easy to talk round (by you, or by text it reads in a file or a web page),
+some limits do not depend on it behaving:
+
+* Secret files (keys, credentials, `.env`, SAIP's own `private.toml`) are never read or written, and files git
+  ignores are never read: that is where secrets usually live.
+* Everything a tool returns has keys, tokens and passwords masked as "[hidden]" (`mask_output`: the token rules
+  of screen text, plus `name = "value"` rules that leave ordinary code such as `api_key: str` alone).
+  A write that would put "[hidden]" into a file is refused, so a masked secret is never written over the real one.
+* CI and editor settings (`.github`, `.gitlab-ci.yml`, `.vscode`, pre-commit and git-hook managers) are never
+  written. Files that run code by themselves (shell scripts, package.json, pyproject.toml, conftest.py and the like)
+  can be written, but the approval card says so.
 """
 from __future__ import annotations
 
 import difflib
 import hashlib
 import os
+import re
 import subprocess
 from pathlib import Path
 
 from . import repos as repos_mod
 from . import websearch
-from .screen import copy_to_clipboard
+from .screen import TOKEN_SECRETS, copy_to_clipboard
 
 TEXT_EXTENSIONS = frozenset({".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".toml", ".yaml", ".yml",
                              ".html", ".css", ".csv", ".tex", ".sh", ".c", ".cpp", ".h", ".java", ".go", ".rs"})
 READ_LIMIT, WRITE_LIMIT, OUTPUT_LIMIT = 60_000, 200_000, 12_000
 READ_TOOLS = ("read_screen", "activity_summary", "git_log", "git_diff", "read_file", "web_search", "fetch_page")
 APPROVE_TOOLS = ("copy_to_clipboard", "write_file")
+
+
+# Never read or written, whatever the model says. Matched against the file name, ignoring case.
+SECRET_NAMES = re.compile(
+    r"(private\.toml|\.env(\..*)?|.*\.env|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|(secrets?|credentials?)([._-].*)?"
+    r"|.*[._-](secrets?|credentials?)(\..*)?|service[-_]?account.*\.json|.*\.(pem|key|p12|pfx|jks|keystore|kdbx)"
+    r"|\.(npmrc|pypirc|netrc|pgpass|git-credentials)|kubeconfig.*|tokens?\.json)", re.IGNORECASE)
+SECRET_DIRS = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".gcloud", ".password-store"})
+# Never written: they run on other machines or every time you open the project.
+PROTECTED_DIRS = frozenset({".github", ".gitlab", ".circleci", ".buildkite", ".husky", ".vscode", ".idea", ".devcontainer"})
+PROTECTED_NAMES = frozenset({".gitlab-ci.yml", ".pre-commit-config.yaml", ".travis.yml", "azure-pipelines.yml",
+                             "bitbucket-pipelines.yml", "lefthook.yml", ".lefthook.yml"})
+# Written only with a warning on the approval card: these run code without anyone opening them.
+RUNS_CODE_NAMES = frozenset({"package.json", "pyproject.toml", "setup.py", "conftest.py", "noxfile.py",
+                             "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"})
+RUNS_CODE_WARNING = ("This file runs code by itself ({why}). Read every change before approving: "
+                     "a bad edit here runs without you opening the file.")
+HIDDEN = "[hidden]"
+# Masking for what tools return (code, config, diffs, pages). The name is kept and only the value hidden, and code
+# such as `def f(api_key: str)` or `token = cfg.token` is left alone.
+_NAME = r"[\w.-]*(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key)[\w.-]*"
+_QUOTED_SECRET = re.compile(                        # db_password = "hunter2", "apiKey": 'abc123', TOKEN: "x9y8"
+    rf"""(?i)(\b{_NAME}["']?\s*[:=]\s*)(["'])(?!\s*[{{$<%])(?!{_NAME}\2)([^"'\n]{{4,}})\2""")
+_BARE_SECRET = re.compile(                          # PASSWORD=hunter2 or `token: abc123` alone on a config line
+    rf"""(?im)^(\s*(?:export\s+)?{_NAME}\s*[:=]\s*)"""
+    r"""(?!(?:none|null|nil|true|false|str|string|int|undefined|optional\b)\s*(?:#.*)?$)"""
+    r"""(?![A-Za-z_]+(?:\.[A-Za-z_]+)*[ \t]*(?:#.*)?$)"""   # a plain name such as cfg.token is code, not a value
+    r"""(?![$<{%*])([^\s#'"(){}\[\],;]{4,})[ \t]*(?:#.*)?$""")
+
+
+_WORDS = re.compile(r"[a-z0-9]{1,15}(?:[_-][a-z0-9]{1,15}){3,}")      # test_f1_stops_the_listener: a name, not a token
+
+
+def mask_output(text: str) -> str:
+    """Hide secrets in what a tool returns before the model sees it."""
+    text = _QUOTED_SECRET.sub(lambda m: f"{m[1]}{m[2]}{HIDDEN}{m[2]}", text)
+    text = _BARE_SECRET.sub(lambda m: f"{m[1]}{HIDDEN}", text)
+    for pat in TOKEN_SECRETS:
+        text = pat.sub(lambda m: m[0] if _WORDS.fullmatch(m[0]) else HIDDEN, text)
+    return text
 
 
 class ToolError(Exception):
@@ -59,10 +112,16 @@ def safe_path(path: str, roots: list[str], *, for_write: bool = False) -> Path:
         full = target.resolve() if (target.exists() or not for_write) else target.parent.resolve() / target.name
     except (OSError, RuntimeError) as e:
         raise ToolError(f"cannot resolve {path}: {e}") from e
-    if not any(full.is_relative_to(r) for r in resolved_roots):
+    root = next((r for r in resolved_roots if full.is_relative_to(r)), None)
+    if root is None:
         raise ToolError(f"{path} is outside the watched folders")
+    inside = full.relative_to(root)                             # folder rules look only below the watched folder
     if ".git" in full.parts:
         raise ToolError("files inside .git are off limits")
+    if secret_file(inside):
+        raise ToolError(f"{full.name} looks like it holds keys or passwords, so I will not open it")
+    if for_write and protected_file(inside):
+        raise ToolError(f"{_tilde(full)} is CI or editor configuration, which I never change: edit it yourself")
     if full.suffix.lower() not in TEXT_EXTENSIONS:
         raise ToolError(f"{full.name} is not a plain-text kind of file I handle")
     if for_write:
@@ -75,6 +134,41 @@ def safe_path(path: str, roots: list[str], *, for_write: bool = False) -> Path:
     elif not full.is_file():
         raise ToolError(f"{path} is not a regular file")
     return full
+
+
+def secret_file(path: Path) -> bool:
+    """Keys, credentials and settings files, by name or by the folder they sit in."""
+    return bool(SECRET_NAMES.fullmatch(path.name)) or any(part in SECRET_DIRS for part in path.parts)
+
+
+def protected_file(path: Path) -> bool:
+    return path.name.lower() in PROTECTED_NAMES or any(part in PROTECTED_DIRS for part in path.parts)
+
+
+def runs_code(path: Path) -> str | None:
+    """Why writing this file is riskier than most, or None."""
+    name = path.name.lower()
+    if path.suffix.lower() == ".sh":
+        return "it is a shell script"
+    if name == "package.json":
+        return "npm runs its scripts, some on install"
+    if name in ("pyproject.toml", "setup.py"):
+        return "it runs when the project is built or installed"
+    if name == "conftest.py":
+        return "pytest runs it before every test"
+    if name in RUNS_CODE_NAMES:
+        return "a tool runs it when the project starts"
+    return None
+
+
+def git_ignored(path: Path) -> bool:
+    """True when the file is in a git repository that ignores it. No git, or not a repository: False."""
+    try:
+        done = subprocess.run(["git", "-C", str(path.parent), "check-ignore", "-q", "--", path.name],
+                              capture_output=True, timeout=5, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return done.returncode == 0
 
 
 def _cap(text: str, limit: int = OUTPUT_LIMIT) -> str:
@@ -143,6 +237,15 @@ class Toolbox:
     def roots(self) -> list[str]:
         return list(self.settings.agent.watch_roots)
 
+    def _path(self, path, *, for_write: bool = False) -> Path:
+        """safe_path, plus SAIP's own settings file under whatever name `--config` gave it."""
+        full = safe_path(path, self.roots, for_write=for_write)
+        from llm.config import find_config
+        config = find_config(getattr(getattr(self.runtime, "opts", None), "config", None))
+        if config is not None and full == Path(config).expanduser().resolve():
+            raise ToolError(f"{full.name} holds SAIP's own settings, so I will not open it")
+        return full
+
     def schemas(self) -> list[dict]:
         out = []
         for n in self.names:
@@ -161,7 +264,7 @@ class Toolbox:
                 self._check(name, args)
                 return {"kind": "approve", "preview": self.preview(name, args)}
             result, label = getattr(self, "_" + name)(args)
-            return {"kind": "read", "result": _cap(result), "label": label}
+            return {"kind": "read", "result": _cap(mask_output(result)), "label": label}
         except (ToolError, websearch.SearchError) as e:
             return {"kind": "error", "result": str(e), "label": f"Could not use {name}: {e}"[:120]}
         except Exception as e:                                  # a tool must never take the chat down
@@ -169,12 +272,16 @@ class Toolbox:
 
     def _check(self, name: str, args: dict) -> None:
         if name == "write_file":
-            safe_path(args.get("path"), self.roots, for_write=True)
+            path = self._path(args.get("path"), for_write=True)
             content = args.get("content")
             if not isinstance(content, str):
                 raise ToolError("no file content was given")
             if len(content) > WRITE_LIMIT:
                 raise ToolError(f"that file is longer than the {WRITE_LIMIT:,} characters I may write")
+            before = path.read_text(encoding="utf-8", errors="replace").count(HIDDEN) if path.exists() else 0
+            if content.count(HIDDEN) > before:
+                raise ToolError(f"the new text contains {HIDDEN}, where SAIP masked a secret I was not shown; "
+                                "writing it would replace the real value, so edit that part yourself")
         elif not isinstance(args.get("text"), str) or not args["text"]:
             raise ToolError("there was no text to copy")
 
@@ -223,7 +330,9 @@ class Toolbox:
         return ((stat + "\n" + diff).strip() or "(no uncommitted changes)"), f"Read the working diff in {_tilde(repo)}"
 
     def _read_file(self, args):
-        path = safe_path(args.get("path"), self.roots)
+        path = self._path(args.get("path"))
+        if git_ignored(path):
+            raise ToolError(f"git ignores {path.name}, and ignored files often hold secrets, so I will not open it")
         with open(path, "rb") as f:
             raw = f.read(READ_LIMIT + 1)
         text = raw[:READ_LIMIT].decode("utf-8", "replace")
@@ -250,12 +359,14 @@ class Toolbox:
         if name == "copy_to_clipboard":
             return {"title": "Copy to clipboard", "content": arguments.get("text", ""), "exists": False, "diff": None,
                     "path": None}
-        path = safe_path(arguments.get("path"), self.roots, for_write=True)
+        path = self._path(arguments.get("path"), for_write=True)
         content, exists, diff = arguments.get("content", ""), path.exists(), None
         if exists:
             old = path.read_text(encoding="utf-8", errors="replace")
             diff = "".join(difflib.unified_diff(old.splitlines(True), content.splitlines(True), "before", "after", n=3))
-        return {"title": f"Write {_tilde(path)}", "path": str(path), "exists": exists, "content": content, "diff": diff}
+        why = runs_code(path)
+        return {"title": f"Write {_tilde(path)}", "path": str(path), "exists": exists, "content": content, "diff": diff,
+                "warning": RUNS_CODE_WARNING.format(why=why) if why else None}
 
     def perform(self, name: str, arguments: dict) -> dict:
         try:
@@ -266,7 +377,7 @@ class Toolbox:
                 ok = copy_to_clipboard(arguments["text"])
                 return {"ok": ok, "detail": "Copied to the clipboard" if ok else "Could not reach the clipboard",
                         "undo": None}
-            path = safe_path(arguments["path"], self.roots, for_write=True)
+            path = self._path(arguments["path"], for_write=True)
             existed = path.exists()
             previous = path.read_text(encoding="utf-8", errors="replace") if existed else None
             data = arguments["content"].encode("utf-8")

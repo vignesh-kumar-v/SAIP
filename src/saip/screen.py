@@ -22,13 +22,17 @@ TERMINALS = ("terminal", "iterm", "ghostty", "kitty", "wezterm", "alacritty", "w
 SEP = "<<SAIP>>"
 MIN_CHARS = 20                       # less than this is a blank page, not context
 
-_SECRETS = [
+# Tokens that look like secrets wherever they appear (screen text, typed text and code alike).
+TOKEN_SECRETS = [
     re.compile(r"\b(sk|pk|rk|ghp|gho|xox[abp])[-_][A-Za-z0-9_\-]{16,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*\S+"),
     # a long unbroken mix of letters and digits (a token); slashes are excluded so file paths survive
     re.compile(r"\b(?=[A-Za-z0-9+_\-]*\d)(?=[A-Za-z0-9+_\-]*[A-Za-z])[A-Za-z0-9+_\-]{40,}\b"),
 ]
+# "password: ..." in what the person sees or types. Too eager for code (it would hide `api_key: str`), so the chat
+# tools mask code with their own, narrower rules instead.
+_SECRETS = [*TOKEN_SECRETS[:2], re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*\S+"),
+            TOKEN_SECRETS[2]]
 
 
 @dataclass(frozen=True)
