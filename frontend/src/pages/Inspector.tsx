@@ -118,7 +118,9 @@ export function Inspector() {
                     <MessageSquarePlus size={15} /> Continue in Chat
                   </Button>
                   <div className="flex items-center gap-2">
-                    <span className="text-[12px] text-faint mr-1">Feedback:</span>
+                    <span className="mr-1 text-[12px] text-faint" title="Only a note for now: it is kept until SAIP stops and does not change what SAIP does or how it is calibrated.">
+                      Your note (kept until SAIP stops, changes nothing):
+                    </span>
                     <button
                       type="button"
                       onClick={() => handleFeedback("up")}

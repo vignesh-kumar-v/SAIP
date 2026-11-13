@@ -83,12 +83,14 @@ export function Chat() {
       abortRef.current.abort();
       abortRef.current = null;
     }
-    if (current) {
-      post("/api/chats/stop", { id: current.id }).catch(() => {});
-    }
     setSending(false);
     setActing(null);
     setRewinding(false);
+    if (current) {
+      // The server drops what the model was about to say, so show the chat as the server has it now.
+      const id = current.id;
+      post("/api/chats/stop", { id }).catch(() => {}).finally(() => get<Chat>(`/api/chats/${id}`).then(setCurrent).catch(() => {}));
+    }
   };
 
   const saveRename = async (id: number, title: string) => {
@@ -174,14 +176,14 @@ export function Chat() {
     }
   };
 
-  const decide = async (item: ChatItem, approve: boolean) => {
+  const decide = async (item: ChatItem, approve: boolean, confirmed: boolean) => {
     if (!current || working) return;
     setActing(item.id);
     setError(null);
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const res = await post<Chat>(`/api/chats/${current.id}/actions/${item.id}`, { approve }, controller.signal);
+      const res = await post<Chat>(`/api/chats/${current.id}/actions/${item.id}`, { approve, confirmed }, controller.signal);
       setCurrent((prev) => ({
         ...res,
         context: res.context ?? prev?.context,
@@ -575,11 +577,11 @@ export function Chat() {
                         onRewind={() => startRewind(it)}
                       />
                     ) : it.kind === "assistant" ? (
-                      <AssistantBubble text={it.text} onQuote={startQuote} disabled={working || pending} />
+                      <AssistantBubble text={it.text} onQuote={startQuote} disabled={working || pending} risky={it.risky} claim={it.claim} />
                     ) : it.kind === "tool" ? (
                       <ToolLine item={it} />
                     ) : (
-                      <ActionCard item={it} busy={acting === it.id} locked={working} onDecide={(ok) => decide(it, ok)} />
+                      <ActionCard item={it} busy={acting === it.id} locked={working} onDecide={(ok, sure) => decide(it, ok, sure)} />
                     )}
                   </motion.div>
                 ))}

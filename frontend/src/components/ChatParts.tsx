@@ -1,8 +1,8 @@
 // Pieces of the Chat page: the conversation items, the action card and the rewind confirm.
 import * as Dialog from "@radix-ui/react-dialog";
-import { Activity, ClipboardCopy, FilePenLine, FileText, GitBranch, Globe, MonitorSmartphone, Pencil, Quote, Reply, TriangleAlert, Undo2, Wrench } from "lucide-react";
+import { Activity, ClipboardCopy, FilePenLine, FileText, GitBranch, Globe, MonitorSmartphone, Pencil, Quote, Reply, ShieldAlert, TriangleAlert, Undo2, Wrench } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ChatAction, ChatItem, ChatView, RewindPreview } from "../lib/types";
+import type { ChatAction, ChatItem, ChatView, RewindPreview, RiskyCommand } from "../lib/types";
 import { Markdown } from "./Markdown";
 import { Button, Pill, Tip, cx } from "./ui";
 
@@ -25,7 +25,37 @@ export function withQuote(quote: string | null, message: string): string {
 }
 
 /** An AI message: Markdown, a Reply button on hover, and a floating "Quote" button over any text you select. */
-export function AssistantBubble({ text, onQuote, disabled }: { text: string; onQuote: (quote: string) => void; disabled: boolean }) {
+// What llm.checks found in a reply: commands that can do damage, and a claim of something that did not happen.
+function ReplyChecks({ risky, claim }: { risky?: RiskyCommand[]; claim?: string | null }) {
+  if (!risky?.length && !claim) return null;
+  return (
+    <div className="mb-2.5 space-y-2">
+      {claim && (
+        <div role="note" className="flex items-start gap-2 rounded-xl border border-stuck/40 bg-stuck-soft px-3 py-2 text-[12.5px] leading-relaxed text-ink">
+          <ShieldAlert size={14} className="mt-0.5 shrink-0 text-stuck" />
+          <span>{claim}</span>
+        </div>
+      )}
+      {!!risky?.length && (
+        <div role="note" className="rounded-xl border border-[color-mix(in_oklab,var(--color-danger)_40%,transparent)] bg-[color-mix(in_oklab,var(--color-danger)_8%,transparent)] px-3 py-2 text-[12.5px] leading-relaxed text-ink">
+          <div className="flex items-center gap-2 font-medium">
+            <TriangleAlert size={14} className="shrink-0 text-danger" />
+            {risky.length === 1 ? "This reply has a command that can do damage" : `This reply has ${risky.length} commands that can do damage`}
+          </div>
+          <ul className="mt-1.5 space-y-1 pl-[22px]">
+            {risky.map((r) => (
+              <li key={r.command}>
+                <code className="num rounded bg-canvas px-1 py-0.5 text-[11.5px] break-all">{r.command}</code> <span className="text-muted">{r.why}.</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function AssistantBubble({ text, onQuote, disabled, risky, claim }: { text: string; onQuote: (quote: string) => void; disabled: boolean; risky?: RiskyCommand[]; claim?: string | null }) {
   const ref = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<{ text: string; top: number; left: number } | null>(null);
   useEffect(() => {
@@ -47,6 +77,7 @@ export function AssistantBubble({ text, onQuote, disabled }: { text: string; onQ
   return (
     <div className="group flex items-start gap-1.5">
       <div ref={ref} onMouseUp={onUp} className="max-w-[min(720px,92%)] min-w-0 rounded-2xl border border-line bg-raised px-4 py-2.5 text-[14.5px] leading-relaxed text-ink">
+        <ReplyChecks risky={risky} claim={claim} />
         <Markdown text={text} />
       </div>
       <div className="mt-1 flex opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100 max-sm:opacity-100">
@@ -106,10 +137,21 @@ export function ToolLine({ item }: { item: ChatItem }) {
   const t = item.tool;
   const Icon = toolIcon(t?.name ?? "");
   const ok = t?.ok !== false;
+  const flag = t?.flag ?? [];
   return (
-    <div className={cx("flex items-center justify-center gap-1.5 px-4 text-[12px]", ok ? "text-faint" : "text-stuck")}>
-      <Icon size={13} className="shrink-0" />
-      <span className="min-w-0 truncate">{t?.label || item.text}</span>
+    <div className="px-4">
+      <div className={cx("flex items-center justify-center gap-1.5 text-[12px]", ok ? "text-faint" : "text-stuck")}>
+        <Icon size={13} className="shrink-0" />
+        <span className="min-w-0 truncate">{t?.label || item.text}</span>
+      </div>
+      {flag.length > 0 && (
+        <div role="note" className="mx-auto mt-1.5 flex max-w-[min(560px,92%)] items-start gap-2 rounded-xl border border-stuck/40 bg-stuck-soft px-3 py-2 text-[12px] leading-relaxed text-ink">
+          <ShieldAlert size={14} className="mt-0.5 shrink-0 text-stuck" />
+          <span>
+            This text looks written to steer the model: {flag.join("; ")}. SAIP told the model not to follow it.
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -138,14 +180,17 @@ const STATE_PILL: Record<ChatAction["state"], { tone: "flow" | "stuck" | "muted"
   failed: { tone: "danger", label: "Failed" },
 };
 
-export function ActionCard({ item, busy, locked, onDecide }: { item: ChatItem; busy: boolean; locked: boolean; onDecide: (approve: boolean) => void }) {
+export function ActionCard({ item, busy, locked, onDecide }: { item: ChatItem; busy: boolean; locked: boolean; onDecide: (approve: boolean, confirmed: boolean) => void }) {
   const a = item.action;
   const [view, setView] = useState<"changes" | "full">("changes");
+  const [checked, setChecked] = useState(false);
   if (!a) return null;
   const write = a.name === "write_file";
   const Icon = write ? FilePenLine : ClipboardCopy;
   const pill = STATE_PILL[a.state];
   const showDiff = write && a.diff != null && view === "changes";
+  const after = a.after ?? [];
+  const mustConfirm = a.state === "pending" && after.length > 0;
   return (
     <div className="mx-auto w-full max-w-[min(640px,92%)] overflow-hidden rounded-2xl border border-line bg-raised">
       <div className="flex items-center gap-2.5 px-4 py-3">
@@ -178,12 +223,29 @@ export function ActionCard({ item, busy, locked, onDecide }: { item: ChatItem; b
         </pre>
       </div>
       <div className="border-t border-line px-4 py-2.5">
+        {mustConfirm && (
+          <div className="mb-2.5 rounded-xl border border-stuck/40 bg-stuck-soft px-3 py-2 text-[12.5px] leading-relaxed text-ink">
+            <p>
+              The model proposed this after reading text it was given. Text in a file, a page or on your screen can carry instructions
+              meant to steer it, so check this is what you asked for.
+            </p>
+            <ul className="mt-1 list-inside list-disc text-muted">
+              {after.map((s) => (
+                <li key={s} className="truncate">{s}</li>
+              ))}
+            </ul>
+            <label className="mt-2 flex cursor-pointer items-center gap-2 font-medium">
+              <input type="checkbox" checked={checked} disabled={busy || locked} onChange={(e) => setChecked(e.target.checked)} className="h-3.5 w-3.5 accent-[var(--color-stuck)]" />
+              I checked this, and it is what I asked for
+            </label>
+          </div>
+        )}
         {a.state === "pending" ? (
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="primary" size="sm" busy={busy} disabled={locked} onClick={() => onDecide(true)}>
+            <Button variant="primary" size="sm" busy={busy} disabled={locked || (mustConfirm && !checked)} onClick={() => onDecide(true, mustConfirm && checked)}>
               {write ? (a.warning ? "Approve anyway: write this file" : "Approve: write this file") : "Approve: copy to clipboard"}
             </Button>
-            <Button variant="ghost" size="sm" disabled={busy || locked} onClick={() => onDecide(false)}>
+            <Button variant="ghost" size="sm" disabled={busy || locked} onClick={() => onDecide(false, false)}>
               Don't
             </Button>
           </div>

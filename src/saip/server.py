@@ -157,6 +157,8 @@ class Api:
                  on_ready=None, on_shutdown=None, offers=offers_payload, health=health_payload):
         self.bus, self.runtime, self.port = bus, runtime, port
         self._plat, self._aw = plat, aw
+        self._stops: dict[int, int] = {}                        # chat id -> how many times Stop was pressed
+        self._stops_lock = threading.Lock()
         self.on_ready, self.on_shutdown = on_ready, on_shutdown
         self.offers, self.health = offers, health
 
@@ -280,21 +282,40 @@ class Api:
             raise ApiError(400, str(e)) from None
         return {"ok": True, "chat": self.chat(c["id"]), "chats": self.chats()["chats"]}
 
+    def _stop_count(self, cid: int) -> int:
+        with self._stops_lock:
+            return self._stops.get(cid, 0)
+
     def chat_stop(self, cid: int | str | None = None) -> dict:
-        return {"ok": True}
+        """Stop what the model is doing in this chat: its next tool or model call is not made, and whatever it was
+        about to write or propose is dropped, so the transcript stays as it was before the message. A model call
+        already waiting for an answer cannot be interrupted, but its answer is thrown away."""
+        try:
+            key = int(cid)
+        except (TypeError, ValueError):
+            return {"ok": True, "stopped": False}
+        with self._stops_lock:
+            self._stops[key] = self._stops.get(key, 0) + 1
+        return {"ok": True, "stopped": True}
 
     def _record(self, cid: int, wire: list, start: int | None, lead: list, out: dict) -> None:
         """Store what a model turn produced: its tool uses, a proposed action, its words."""
         items = list(lead)
         for e in out["events"]:
-            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"]}})
+            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"],
+                                                                        "flag": e.get("flag")}})
         p = out["pending"]
         if p:
+            from .chat_tools import UNTRUSTED_TOOLS
             pv = p["preview"]
+            seen = self.runtime.chats.get(cid)
+            read = [i["tool"] for i in (seen["items"] if seen else []) if i["kind"] == "tool"] + out["events"]
+            after = list(dict.fromkeys(t["label"] + (" (has text aimed at the model)" if t.get("flag") else "")
+                                       for t in read if t.get("ok") and t.get("name") in UNTRUSTED_TOOLS))
             items.append({"kind": "action", "text": pv.get("title") or p["name"], "_call": p["call_id"], "_args": p["arguments"],
                           "action": {"name": p["name"], "title": pv.get("title") or p["name"], "path": pv.get("path"),
                                      "content": pv.get("content"), "diff": pv.get("diff"), "exists": bool(pv.get("exists")),
-                                     "warning": pv.get("warning"),
+                                     "warning": pv.get("warning"), "after": after[-6:],
                                      "state": "pending", "detail": None}})
         if out["text"]:
             items.append({"kind": "assistant", "text": out["text"]})
@@ -304,7 +325,9 @@ class Api:
 
     def _turn(self, cid: int, wire: list, toolbox) -> dict:
         from llm.chat import chat_turn
-        out = chat_turn(self.runtime.client, wire, toolbox.schemas(), toolbox.run)
+        pressed = self._stop_count(cid)
+        out = chat_turn(self.runtime.client, wire, toolbox.schemas(), toolbox.run,
+                        should_stop=lambda: self._stop_count(cid) != pressed)
         if out["tools_unsupported"]:
             try:
                 self.runtime.tools_unsupported = True
@@ -313,7 +336,7 @@ class Api:
         return out
 
     def chat_send(self, cid: int, message: str) -> dict:
-        from llm.chat import base_messages
+        from llm.chat import Stopped, base_messages
         from llm.client import LLMError
         from .chats import MAX_MESSAGE, Chats
         chats, rt = self._chats(), self.runtime
@@ -339,22 +362,34 @@ class Api:
             if c.get("first"):
                 wire.append({"role": "assistant", "content": c["first"]})
         start = len(wire)
-        wire.append({"role": "user", "content": text})
+        from llm.sanitize import clean
+        wire.append({"role": "user", "content": clean(text)})     # what was pasted may hide characters; the page keeps it
         try:
             out = self._turn(cid, wire, toolbox)
+        except Stopped:
+            return self.chat_get(cid)                           # nothing was recorded: the chat is as it was
         except LLMError as e:
             raise ApiError(502, f"the model did not answer: {e}") from None
         self._record(cid, out["messages"], start, [{"kind": "user", "text": text}], out)
         return self.chat_get(cid)
 
-    def chat_action(self, cid: int, item_id: int, approve: bool) -> dict:
-        from llm.chat import tool_result_message
+    @staticmethod
+    def _needs_confirming(item: dict, approve: bool, confirmed: bool) -> None:
+        """An action proposed after the model read text it was given (files, diffs, the screen, the web) may have been
+        steered by that text, so approving it needs `confirmed` as well: the page asks the person to tick a box."""
+        if approve and item["action"].get("after") and not confirmed and item["action"]["state"] == "pending":
+            raise ApiError(409, "this was proposed after reading " + "; ".join(item["action"]["after"]) +
+                           ". Check it is what you asked for, then confirm")
+
+    def chat_action(self, cid: int, item_id: int, approve: bool, confirmed: bool = False) -> dict:
+        from llm.chat import Stopped, tool_result_message
         from llm.client import LLMError
         chats = self._chats()
         c = chats.get(cid)
         item = None if c is None else next((i for i in c["items"] if i["id"] == item_id and i["kind"] == "action"), None)
         if item is None:
             raise ApiError(404, "no such action")
+        self._needs_confirming(item, approve, confirmed)
         if item["action"]["state"] != "pending" or not chats.claim_action(cid, item_id):
             raise ApiError(409, "that action was already decided")
         if getattr(self.runtime, "client", None) is None:
@@ -376,7 +411,7 @@ class Api:
         wire = c["wire"] + [tool_result_message(item["_call"], result)]
         try:
             out = self._turn(cid, wire, toolbox)
-        except LLMError:
+        except (LLMError, Stopped):
             chats.set_wire(cid, wire)                           # the action stands; the next message continues from here
             return self.chat_get(cid)
         self._record(cid, out["messages"], None, [], out)
@@ -777,7 +812,7 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 if not isinstance(b.get("approve"), bool):
                     self._json({"error": "expected {\"approve\": true or false}"}, 400)
                     return
-                self._reply(lambda: api.chat_action(cid, item, b["approve"]))
+                self._reply(lambda: api.chat_action(cid, item, b["approve"], b.get("confirmed") is True))
             else:
                 self._json({"error": "not found"}, 404)
 

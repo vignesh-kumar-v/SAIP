@@ -194,19 +194,19 @@ export const GATE_PRESETS = [
   {
     id: "quiet",
     name: "Quiet",
-    caption: "High precision, fewest false alarms",
+    caption: "Offers help less often",
     gate: { c0: 1.0, m0: 1.2, alpha: 1.1, beta: 0.69 },
   },
   {
     id: "balanced",
     name: "Balanced",
-    caption: "Best F1 trade-off",
+    caption: "The default",
     gate: { c0: 1.0, m0: 2.0, alpha: 1.1, beta: 0.69 },
   },
   {
     id: "eager",
     name: "Eager",
-    caption: "High recall, catches more stuck moments",
+    caption: "Offers help sooner, and more often",
     gate: { c0: 1.0, m0: 4.5, alpha: 1.1, beta: 0.69 },
   },
 ] as const;
@@ -221,6 +221,7 @@ export type ChatAction = {
   diff: string | null;
   exists: boolean;
   warning?: string | null;
+  after?: string[];
   state: ActionState;
   detail?: string;
   undoable: boolean;
@@ -230,9 +231,12 @@ export type ChatItem = {
   kind: "user" | "assistant" | "tool" | "action";
   at: number;
   text: string;
-  tool?: { name: string; label: string; ok: boolean };
+  tool?: { name: string; label: string; ok: boolean; flag?: string[] | null };
   action?: ChatAction;
+  risky?: RiskyCommand[];
+  claim?: string | null;
 };
+export type RiskyCommand = { command: string; why: string };
 export type ChatMessage = { role: "user" | "assistant"; text: string; at: number };
 export type ChatFull = {
   id: number;

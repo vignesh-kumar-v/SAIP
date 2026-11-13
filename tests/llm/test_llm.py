@@ -396,9 +396,15 @@ def test_server_test_endpoint_auto_detects_single_and_multiple_models(monkeypatc
     assert res_multi["models"] == ["m1", "m2"]
 
 
-def test_server_test_endpoint_retries_with_reasoning_effort_none(monkeypatch):
+def test_server_test_endpoint_retries_with_reasoning_effort_none(monkeypatch, tmp_path):
     from saip import setup
     from saip.server import Api, _classify
+
+    empty = tmp_path / "empty.toml"                       # test_endpoint reads the settings: never the real private.toml
+    empty.write_text("")
+    monkeypatch.setenv("SAIP_CONFIG", str(empty))
+    for name in ("SAIP_LLM_BASE_URL", "SAIP_LLM_MODEL", "SAIP_LLM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
 
     api = Api(bus=None, plat=type("P", (), {"name": "darwin"})())
 
@@ -461,7 +467,7 @@ def test_server_chat_api_methods():
     assert exc_404.value.code == 404
 
     # 3. chat_stop
-    assert api.chat_stop(c1["id"]) == {"ok": True}
+    assert api.chat_stop(c1["id"])["ok"] is True
 
     # 4. inspector_feedback
     entry1 = {"time": 100.5, "decision": "offer", "context": "ctx1"}

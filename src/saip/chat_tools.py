@@ -30,14 +30,22 @@ from pathlib import Path
 from . import repos as repos_mod
 from . import websearch
 from .screen import TOKEN_SECRETS, copy_to_clipboard
+from llm.checks import injection_signs
+from llm.sanitize import strip_hidden
 
 TEXT_EXTENSIONS = frozenset({".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".toml", ".yaml", ".yml",
                              ".html", ".css", ".csv", ".tex", ".sh", ".c", ".cpp", ".h", ".java", ".go", ".rs"})
 READ_LIMIT, WRITE_LIMIT, OUTPUT_LIMIT = 60_000, 200_000, 12_000
+MAX_WALKED = 20_000          # folder entries list_files and search_text will look at, so a huge folder cannot stall a reply
 READ_TOOLS = ("read_screen", "activity_summary", "list_repos", "git_status", "git_log", "git_diff",
               "list_files", "search_text", "read_file", "web_search", "fetch_page")
 APPROVE_TOOLS = ("copy_to_clipboard", "write_file", "edit_file")
 SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next"})
+# Tools whose result is text the person did not write for the model: it can carry instructions meant to steer it.
+# An action proposed after any of them (anywhere in the chat, since the model still remembers it) has to be
+# confirmed on purpose. File and folder listings count: they return names and contents from the person's disk.
+UNTRUSTED_TOOLS = frozenset({"read_file", "git_diff", "git_log", "git_status", "list_repos", "list_files",
+                             "search_text", "read_screen", "web_search", "fetch_page"})
 
 
 # Never read or written, whatever the model says. Matched against the file name, ignoring case.
@@ -276,6 +284,10 @@ class Toolbox:
                     except ToolError:
                         pass
         full = safe_path(path, self.roots, for_write=for_write)
+        if for_write and full.exists() and git_ignored(full):
+            # Not even to propose an edit: the checks answer the model before any approval ("old_text not found",
+            # "matched 2 places"), and guessing at old_text would let it learn the contents of a file piece by piece.
+            raise ToolError(f"git ignores {full.name}, and ignored files often hold secrets, so I will not edit it")
         from llm.config import find_config
         config = find_config(getattr(getattr(self.runtime, "opts", None), "config", None))
         if config is not None and full == Path(config).expanduser().resolve():
@@ -300,7 +312,14 @@ class Toolbox:
                 self._check(name, args)
                 return {"kind": "approve", "preview": self.preview(name, args)}
             result, label = getattr(self, "_" + name)(args)
-            return {"kind": "read", "result": _cap(mask_output(result)), "label": label}
+            text, hidden = strip_hidden(result)
+            flag = injection_signs(text)
+            if hidden and hidden["message"]:
+                flag.insert(0, f"hides a message in invisible characters: \u201c{hidden['message'][:120]}\u201d")
+            out = {"kind": "read", "result": _cap(mask_output(text)), "label": label}
+            if flag:
+                out["flag"] = flag
+            return out
         except (ToolError, websearch.SearchError) as e:
             return {"kind": "error", "result": str(e), "label": f"Could not use {name}: {e}"[:120]}
         except Exception as e:                                  # a tool must never take the chat down
@@ -368,13 +387,12 @@ class Toolbox:
                 return found[0]
             ctx = (getattr(self.runtime, "last_context", "") or "").lower()
             if ctx:
-                by_ctx = [r for r in found if r.name.lower() in ctx]
+                # A repository counts as "the one in front" only when its whole name appears in the recent activity
+                # and exactly one repository does. A short name ("repo") must not match inside another word.
+                by_ctx = [r for r in found if len(r.name) >= 4
+                          and re.search(rf"(?<![\w-]){re.escape(r.name.lower())}(?![\w-])", ctx)]
                 if len(by_ctx) == 1:
                     return by_ctx[0]
-            cwd = Path.cwd().resolve()
-            for r in found:
-                if cwd.is_relative_to(r.resolve()):
-                    return r
             names = ", ".join(r.name for r in found[:10])
             more = f" (and {len(found) - 10} more)" if len(found) > 10 else ""
             raise ToolError(f"multiple repositories are watched ({names}{more}); pass repo=... to choose one")
@@ -478,14 +496,17 @@ class Toolbox:
 
     def _walk_files(self, base: Path, root: Path, *, max_depth: int = 4) -> list[Path]:
         files: list[Path] = []
+        asked: dict[Path, set[Path]] = {}                       # directory -> its files git ignores, asked once
         stack: list[tuple[Path, int]] = [(base, 0)]
-        while stack:
+        looked = 0
+        while stack and looked < MAX_WALKED:
             cur, depth = stack.pop()
             try:
                 entries = sorted(cur.iterdir(), key=lambda p: p.name.lower())
             except OSError:
                 continue
             for entry in entries:
+                looked += 1
                 if entry.is_symlink():
                     continue
                 rel = entry.relative_to(root)
@@ -495,9 +516,27 @@ class Toolbox:
                     if depth < max_depth:
                         stack.append((entry, depth + 1))
                 elif entry.is_file() and entry.suffix.lower() in TEXT_EXTENSIONS:
-                    if not secret_file(rel) and not git_ignored(entry):
+                    if not secret_file(rel) and entry not in self._ignored_in(cur, asked):
                         files.append(entry)
         return sorted(files, key=lambda p: (len(p.relative_to(base).parts), str(p.relative_to(base)).lower()))
+
+    @staticmethod
+    def _ignored_in(folder: Path, asked: dict) -> set:
+        """The files in `folder` that git ignores: one `git check-ignore` call for the whole folder, not one per file."""
+        if folder in asked:
+            return asked[folder]
+        ignored: set[Path] = set()
+        try:
+            names = [p.name for p in folder.iterdir() if p.is_file()]
+            if names:
+                done = subprocess.run(["git", "-C", str(folder), "check-ignore", "--stdin", "-z"], input="\0".join(names) + "\0",
+                                      capture_output=True, text=True, timeout=10, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+                if done.returncode in (0, 1):                    # 1 means none of them is ignored
+                    ignored = {folder / n for n in done.stdout.split("\0") if n}
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        asked[folder] = ignored
+        return ignored
 
     def _list_files(self, args):
         base, root = self._dir(args.get("path"))
