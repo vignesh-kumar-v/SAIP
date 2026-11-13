@@ -574,3 +574,72 @@ def test_hidden_characters_in_a_message_do_not_reach_the_model(rig):
     view = rig.api.chat_send(rig.cid, "hi​ there")
     assert view["items"][0]["text"] == "hi​ there"                  # the page shows what was typed
     assert rig.rt.client.sent[-1][-1] == {"role": "user", "content": "hi there"}
+
+
+# ---------------------------------------------------------------------------------------------------- review fixes (PR 7)
+def test_rewind_puts_an_edited_file_back_too(rig):
+    path = rig.root / "plan.md"
+    path.write_text("step one\nstep two\n")
+    rig.rt.client.replies += [call("edit_file", {"path": str(path), "old_text": "step two", "new_text": "step 2"}),
+                              say("Edited.")]
+    view = rig.api.chat_send(rig.cid, "rename step two")
+    action = next(i for i in view["items"] if i["kind"] == "action")
+    rig.api.chat_action(rig.cid, action["id"], True)
+    assert path.read_text() == "step one\nstep 2\n"
+    user = next(i for i in rig.api.chat_get(rig.cid)["items"] if i["kind"] == "user")
+    preview = rig.api.chat_rewind_preview(rig.cid, user["id"])
+    assert preview["undo"] == [{"path": str(path.resolve()), "effect": "restore"}]
+    out = rig.api.chat_rewind(rig.cid, user["id"])
+    assert path.read_text() == "step one\nstep two\n" and out["undone"] and not out["skipped"]
+
+
+def test_stop_drops_what_the_model_was_about_to_say(rig):
+    """The page stops waiting, and the server now stops too: nothing the turn produced is saved afterwards."""
+    api, cid = rig.api, rig.cid
+
+    class Presses:
+        def __init__(self):
+            self.replies = [say("this reply arrives after Stop")]
+
+        def chat(self, messages, tools=None, **kw):
+            api.chat_stop(cid)                                # Stop is pressed while the model is still working
+            return self.replies.pop(0)
+
+    rig.rt.client = Presses()
+    before = kinds(api.chat_get(cid))
+    view = api.chat_send(cid, "write me an essay")
+    assert kinds(view) == before and not any("arrives after" in i["text"] for i in view["items"])
+    assert not any(i["text"] == "write me an essay" for i in view["items"])       # not even the question is kept
+    rig.rt.client = Model(say("A normal reply."))             # a later message is not affected by the earlier Stop
+    assert kinds(api.chat_send(cid, "hello")) == ["user", "assistant"]
+
+
+def test_stop_between_tool_rounds_runs_no_more_tools(rig):
+    api, cid = rig.api, rig.cid
+    (rig.root / "a.md").write_text("A")
+    ran = []
+
+    class Model2:
+        def __init__(self):
+            self.n = 0
+
+        def chat(self, messages, tools=None, **kw):
+            self.n += 1
+            if self.n == 1:
+                return call("read_file", {"path": str(rig.root / "a.md")}, cid="c1")
+            raise AssertionError("the model was called again after Stop")
+
+    rig.rt.client = Model2()
+    real_run = chat_tools.Toolbox.run
+
+    def run_then_stop(self, name, args):
+        ran.append(name)
+        api.chat_stop(cid)                                    # Stop arrives while a tool is running
+        return real_run(self, name, args)
+
+    chat_tools.Toolbox.run = run_then_stop
+    try:
+        view = api.chat_send(cid, "read a.md")
+    finally:
+        chat_tools.Toolbox.run = real_run
+    assert ran == ["read_file"] and kinds(view) == []

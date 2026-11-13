@@ -133,12 +133,37 @@ class Chats:
         c["items"].append(item)
         return item
 
+    def rename(self, cid: int | str, title: str) -> dict:
+        t = str(title or "").strip()[:80]
+        if not t:
+            raise ValueError("Enter a title.")
+        try:
+            key = int(cid)
+        except (ValueError, TypeError):
+            key = cid
+        with self._lock:
+            if key not in self._chats:
+                raise KeyError(cid)
+            self._chats[key]["title"] = t
+            self._save()
+        res = self.get(key)
+        if res is None:
+            raise KeyError(cid)
+        return res
+
     def get(self, cid: int) -> dict | None:
         with self._lock:
             c = self._chats.get(cid)
             if c is None:
                 return None
-            return {**c, "items": copy.deepcopy(c["items"]), "wire": list(c["wire"]), "messages": self._messages(c)}
+            from .chat_tools import mask_output
+            ctx = c.get("context", "") or ""
+            scr = c.get("screen")
+            if isinstance(scr, dict):
+                scr = {**scr, "text": mask_output(scr.get("text", ""))}
+            return {**c, "context": mask_output(ctx) if ctx else "",
+                    "screen": scr,
+                    "items": copy.deepcopy(c["items"]), "wire": list(c["wire"]), "messages": self._messages(c)}
 
     @staticmethod
     def _messages(c: dict) -> list[dict]:
@@ -257,7 +282,7 @@ class Chats:
 
     @staticmethod
     def _undoable(tail: list[dict]) -> list[dict]:
-        return [i for i in reversed(tail) if i["kind"] == "action" and i["action"]["name"] == "write_file"
+        return [i for i in reversed(tail) if i["kind"] == "action" and i["action"]["name"] in ("write_file", "edit_file")
                 and i["action"]["state"] == "approved" and i.get("_undo")]
 
     def rewind_preview(self, cid: int, item_id: int) -> dict:

@@ -149,14 +149,18 @@ The **Chat** page is a normal conversation, and it knows what you were doing in 
 |---|---|---|
 | Read your screen | The text near your cursor in the front app | No |
 | Activity summary | What you did in the last few minutes | No |
-| Git log and diff | Recent commits and uncommitted changes in your watched repositories | No |
-| Read a file | Text and code files inside your watched folders only, never secret files or files git ignores | No |
+| Repositories and git | List the watched repositories, and show git status, recent commits and uncommitted changes | No |
+| Find and read files | List and search text files, and read one, inside your watched folders only. Never secret files or files git ignores | No |
 | Web search and open a page | DuckDuckGo by default, or Brave or Tavily with a key. **Off until you switch it on.** | No |
 | Copy to clipboard | Puts text you can see on your clipboard | **Yes** |
-| Write a file | Plain-text and code files inside your watched folders only. You see the whole file, or the changes if it exists. | **Yes** |
+| Write or edit a file | Plain-text and code files inside your watched folders only. You see the whole file, or the changes if it exists. Existing files that git ignores cannot be edited. | **Yes** |
 
 It cannot write into other apps, make git commits, run commands, or touch anything inside `.git`. It can only
-propose; nothing happens until you press **Approve**. **Rewind puts written files back as they were**. A file you
+propose; nothing happens until you press **Approve**. An action proposed after it read a file, a diff, the screen or a
+web page needs a second tick ("I checked this"), because that text may have been written to steer it. **Stop** ends
+the reply: the model's next step is not taken and what it was about to say is dropped (a model call already waiting
+for an answer cannot be interrupted, but its answer is thrown away). **Rewind puts written and edited files back as
+they were**. A file you
 changed yourself in the meantime is left alone, and a clipboard copy or a web search cannot be undone (the dialog tells
 you before you confirm).
 

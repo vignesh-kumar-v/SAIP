@@ -36,12 +36,16 @@ from llm.sanitize import strip_hidden
 TEXT_EXTENSIONS = frozenset({".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".toml", ".yaml", ".yml",
                              ".html", ".css", ".csv", ".tex", ".sh", ".c", ".cpp", ".h", ".java", ".go", ".rs"})
 READ_LIMIT, WRITE_LIMIT, OUTPUT_LIMIT = 60_000, 200_000, 12_000
-READ_TOOLS = ("read_screen", "activity_summary", "git_log", "git_diff", "read_file", "web_search", "fetch_page")
-APPROVE_TOOLS = ("copy_to_clipboard", "write_file")
+MAX_WALKED = 20_000          # folder entries list_files and search_text will look at, so a huge folder cannot stall a reply
+READ_TOOLS = ("read_screen", "activity_summary", "list_repos", "git_status", "git_log", "git_diff",
+              "list_files", "search_text", "read_file", "web_search", "fetch_page")
+APPROVE_TOOLS = ("copy_to_clipboard", "write_file", "edit_file")
+SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build", ".next"})
 # Tools whose result is text the person did not write for the model: it can carry instructions meant to steer it.
 # An action proposed after any of them (anywhere in the chat, since the model still remembers it) has to be
-# confirmed on purpose.
-UNTRUSTED_TOOLS = frozenset({"read_file", "git_diff", "git_log", "read_screen", "web_search", "fetch_page"})
+# confirmed on purpose. File and folder listings count: they return names and contents from the person's disk.
+UNTRUSTED_TOOLS = frozenset({"read_file", "git_diff", "git_log", "git_status", "list_repos", "list_files",
+                             "search_text", "read_screen", "web_search", "fetch_page"})
 
 
 # Never read or written, whatever the model says. Matched against the file name, ignoring case.
@@ -197,11 +201,21 @@ def _git(repo: Path, *args: str) -> str:
 SCHEMAS = {
     "read_screen": ("Read the text in the app the person has in front of them, near the cursor.", {}, []),
     "activity_summary": ("Get SAIP's current summary of the person's recent activity.", {}, []),
+    "list_repos": ("List the watched git repositories (name, path, and current branch).", {}, []),
+    "git_status": ("Show the current branch and modified/untracked files of a watched git repository.",
+                   {"repo": {"type": "string", "description": "repository name or folder; omit if only one or active"}}, []),
     "git_log": ("List recent commits (one line each) of a watched git repository.",
-                {"repo": {"type": "string", "description": "repository folder; omit for the first watched one"},
+                {"repo": {"type": "string", "description": "repository name or folder; omit if only one or active"},
                  "limit": {"type": "integer", "description": "how many commits, at most 20"}}, []),
     "git_diff": ("Show the uncommitted changes (diffstat, then the diff) of a watched git repository.",
-                 {"repo": {"type": "string", "description": "repository folder; omit for the first watched one"}}, []),
+                 {"repo": {"type": "string", "description": "repository name or folder; omit if only one or active"}}, []),
+    "list_files": ("List plain-text files inside a watched folder or repository.",
+                   {"path": {"type": "string", "description": "folder or repository name; omit for active repo or root"},
+                    "limit": {"type": "integer", "description": "max files to list, at most 200"}}, []),
+    "search_text": ("Search for text across plain-text files inside a watched folder or repository.",
+                    {"query": {"type": "string", "description": "text to search for (case-insensitive)"},
+                     "path": {"type": "string", "description": "folder or repository name; omit for active repo or root"}},
+                    ["query"]),
     "read_file": ("Read a text file inside a watched folder.",
                   {"path": {"type": "string", "description": "absolute, ~/..., or relative to a watched folder"}},
                   ["path"]),
@@ -213,6 +227,11 @@ SCHEMAS = {
     "write_file": ("Propose saving a text file inside a watched folder (new or replacing); the person must approve "
                    "first.", {"path": {"type": "string"}, "content": {"type": "string", "description": "whole file"}},
                    ["path", "content"]),
+    "edit_file": ("Propose replacing one exact block of text in an existing file; the person must approve first.",
+                  {"path": {"type": "string"},
+                   "old_text": {"type": "string", "description": "exact text currently in the file (unique match)"},
+                   "new_text": {"type": "string", "description": "replacement text"}},
+                  ["path", "old_text", "new_text"]),
 }
 
 
@@ -228,7 +247,8 @@ class Toolbox:
                 if llm.read_screen:
                     names.append("read_screen")
             if roots:
-                names += ["git_log", "git_diff", "read_file", "write_file"]
+                names += ["list_repos", "git_status", "git_log", "git_diff", "list_files", "search_text",
+                          "read_file", "write_file", "edit_file"]
             names.append("copy_to_clipboard")
             if llm.web_search:
                 names += ["web_search", "fetch_page"]
@@ -244,8 +264,30 @@ class Toolbox:
         return list(self.settings.agent.watch_roots)
 
     def _path(self, path, *, for_write: bool = False) -> Path:
-        """safe_path, plus SAIP's own settings file under whatever name `--config` gave it."""
+        """safe_path, plus nested-repo prefix resolution and SAIP's own settings file."""
+        if isinstance(path, str) and path.strip():
+            raw = path.strip()
+            p = Path(raw).expanduser()
+            if not p.is_absolute() and not any((r / p).exists() for r in _roots(self.roots)):
+                parts = p.parts
+                if len(parts) >= 2:
+                    try:
+                        repo = self._repo({"repo": parts[0]})
+                        path = str(repo.joinpath(*parts[1:]))
+                    except ToolError:
+                        pass
+                if path == raw:
+                    try:
+                        repo = self._repo({})
+                        if (repo / p).exists() or (for_write and (repo / p).parent.is_dir()):
+                            path = str(repo / p)
+                    except ToolError:
+                        pass
         full = safe_path(path, self.roots, for_write=for_write)
+        if for_write and full.exists() and git_ignored(full):
+            # Not even to propose an edit: the checks answer the model before any approval ("old_text not found",
+            # "matched 2 places"), and guessing at old_text would let it learn the contents of a file piece by piece.
+            raise ToolError(f"git ignores {full.name}, and ignored files often hold secrets, so I will not edit it")
         from llm.config import find_config
         config = find_config(getattr(getattr(self.runtime, "opts", None), "config", None))
         if config is not None and full == Path(config).expanduser().resolve():
@@ -283,6 +325,29 @@ class Toolbox:
         except Exception as e:                                  # a tool must never take the chat down
             return {"kind": "error", "result": f"{name} failed: {e}", "label": f"Could not use {name}"}
 
+    def _edit_content(self, args: dict) -> tuple[Path, str, str]:
+        path = self._path(args.get("path"), for_write=True)
+        if not path.exists():
+            raise ToolError(f"{_tilde(path)} does not exist")
+        old_text, new_text = args.get("old_text"), args.get("new_text")
+        if not isinstance(old_text, str) or not old_text:
+            raise ToolError("no old_text was given")
+        if not isinstance(new_text, str):
+            raise ToolError("no new_text was given")
+        previous = path.read_text(encoding="utf-8", errors="replace")
+        matches = previous.count(old_text)
+        if matches == 0:
+            raise ToolError(f"old_text was not found in {_tilde(path)}")
+        if matches > 1:
+            raise ToolError(f"old_text matched {matches} places in {_tilde(path)}; include more surrounding lines")
+        updated = previous.replace(old_text, new_text, 1)
+        if len(updated) > WRITE_LIMIT:
+            raise ToolError(f"that file is longer than the {WRITE_LIMIT:,} characters I may write")
+        if updated.count(HIDDEN) > previous.count(HIDDEN):
+            raise ToolError(f"the new text contains {HIDDEN}, where SAIP masked a secret I was not shown; "
+                            "writing it would replace the real value, so edit that part yourself")
+        return path, previous, updated
+
     def _check(self, name: str, args: dict) -> None:
         if name == "write_file":
             path = self._path(args.get("path"), for_write=True)
@@ -295,6 +360,8 @@ class Toolbox:
             if content.count(HIDDEN) > before:
                 raise ToolError(f"the new text contains {HIDDEN}, where SAIP masked a secret I was not shown; "
                                 "writing it would replace the real value, so edit that part yourself")
+        elif name == "edit_file":
+            self._edit_content(args)
         elif not isinstance(args.get("text"), str) or not args["text"]:
             raise ToolError("there was no text to copy")
 
@@ -312,20 +379,70 @@ class Toolbox:
 
     def _repo(self, args) -> Path:
         given = args.get("repo")
+        found = repos_mod.discover(self.settings.agent)
         if not given:
-            found = repos_mod.discover(self.settings.agent)
             if not found:
                 raise ToolError("no git repository is being watched")
-            return found[0]
-        repo = Path(str(given)).expanduser()
+            if len(found) == 1:
+                return found[0]
+            ctx = (getattr(self.runtime, "last_context", "") or "").lower()
+            if ctx:
+                # A repository counts as "the one in front" only when its whole name appears in the recent activity
+                # and exactly one repository does. A short name ("repo") must not match inside another word.
+                by_ctx = [r for r in found if len(r.name) >= 4
+                          and re.search(rf"(?<![\w-]){re.escape(r.name.lower())}(?![\w-])", ctx)]
+                if len(by_ctx) == 1:
+                    return by_ctx[0]
+            names = ", ".join(r.name for r in found[:10])
+            more = f" (and {len(found) - 10} more)" if len(found) > 10 else ""
+            raise ToolError(f"multiple repositories are watched ({names}{more}); pass repo=... to choose one")
+        raw = str(given).strip()
+        repo = Path(raw).expanduser()
         if not repo.is_absolute():
+            # Match against discovered nested repos by exact name, normalized name, or suffix before root / repo.
+            low = raw.lower()
+            norm = re.sub(r"[-_\s]+", "", low)
+            exact = [r for r in found if r.name.lower() == low]
+            if len(exact) == 1:
+                return exact[0]
+            normed = [r for r in found if re.sub(r"[-_\s]+", "", r.name.lower()) == norm]
+            if len(normed) == 1:
+                return normed[0]
+            partial = [r for r in found if r.as_posix().lower().endswith("/" + low) or low in r.name.lower()]
+            if len(partial) == 1:
+                return partial[0]
             repo = next((r / repo for r in _roots(self.roots) if (r / repo).is_dir()), _roots(self.roots)[0] / repo)
         repo = repo.resolve()
         if not any(repo.is_relative_to(r) for r in _roots(self.roots)):
             raise ToolError(f"{given} is outside the watched folders")
         if not (repo / ".git").exists():
-            raise ToolError(f"{_tilde(repo)} is not a git repository")
+            by_name = {r.name.lower(): r.name for r in found}
+            close = [by_name[m] for m in difflib.get_close_matches(raw.lower(), by_name, n=3, cutoff=0.55)]
+            hint = f" Did you mean: {', '.join(close)}?" if close else ""
+            if not hint and found:
+                hint = f" Available: {', '.join(r.name for r in found[:8])}."
+            raise ToolError(f"{_tilde(repo)} is not a git repository.{hint}")
         return repo
+
+    def _list_repos(self, args):
+        found = repos_mod.discover(self.settings.agent)
+        if not found:
+            return "(no git repositories are being watched)", "Listed watched repositories"
+        lines = []
+        for r in found[:40]:
+            try:
+                branch = _git(r, "rev-parse", "--abbrev-ref", "HEAD").strip() or "?"
+            except ToolError:
+                branch = "?"
+            lines.append(f"{r.name}\t{branch}\t{_tilde(r)}")
+        if len(found) > 40:
+            lines.append(f"... and {len(found) - 40} more")
+        return "\n".join(lines), f"Listed {len(found)} watched repositories"
+
+    def _git_status(self, args):
+        repo = self._repo(args)
+        out = _git(repo, "status", "-sb").strip() or "(clean)"
+        return out, f"Checked git status in {_tilde(repo)}"
 
     def _git_log(self, args):
         repo = self._repo(args)
@@ -341,6 +458,119 @@ class Toolbox:
         plain = ("diff", "--no-color", "--no-ext-diff", "--no-textconv")
         stat, diff = _git(repo, *plain, "--stat"), _git(repo, *plain)
         return ((stat + "\n" + diff).strip() or "(no uncommitted changes)"), f"Read the working diff in {_tilde(repo)}"
+
+    def _dir(self, given) -> tuple[Path, Path]:
+        resolved_roots = _roots(self.roots)
+        if not resolved_roots:
+            raise ToolError("no watched folder is set up, so there is nowhere I may read")
+        if not given:
+            try:
+                base = self._repo({})
+            except ToolError:
+                base = resolved_roots[0]
+        else:
+            raw = str(given).strip()
+            p = Path(raw).expanduser()
+            if p.is_absolute():
+                base = p
+            else:
+                direct = next((r / p for r in resolved_roots if (r / p).is_dir()), None)
+                if direct is not None:
+                    base = direct
+                elif len(p.parts) >= 2:
+                    base = self._repo({"repo": p.parts[0]}).joinpath(*p.parts[1:])
+                else:
+                    try:
+                        base = self._repo({"repo": raw})
+                    except ToolError:
+                        base = self._repo({}) / p
+        full = base.resolve()
+        root = next((r for r in resolved_roots if full.is_relative_to(r)), None)
+        if root is None:
+            raise ToolError(f"{given} is outside the watched folders")
+        if ".git" in full.parts or any(part in SECRET_DIRS for part in full.relative_to(root).parts):
+            raise ToolError(f"{_tilde(full)} is off limits")
+        if not full.is_dir():
+            raise ToolError(f"{_tilde(full)} is not a folder")
+        return full, root
+
+    def _walk_files(self, base: Path, root: Path, *, max_depth: int = 4) -> list[Path]:
+        files: list[Path] = []
+        asked: dict[Path, set[Path]] = {}                       # directory -> its files git ignores, asked once
+        stack: list[tuple[Path, int]] = [(base, 0)]
+        looked = 0
+        while stack and looked < MAX_WALKED:
+            cur, depth = stack.pop()
+            try:
+                entries = sorted(cur.iterdir(), key=lambda p: p.name.lower())
+            except OSError:
+                continue
+            for entry in entries:
+                looked += 1
+                if entry.is_symlink():
+                    continue
+                rel = entry.relative_to(root)
+                if entry.is_dir():
+                    if entry.name in SKIP_DIRS or entry.name in SECRET_DIRS:
+                        continue
+                    if depth < max_depth:
+                        stack.append((entry, depth + 1))
+                elif entry.is_file() and entry.suffix.lower() in TEXT_EXTENSIONS:
+                    if not secret_file(rel) and entry not in self._ignored_in(cur, asked):
+                        files.append(entry)
+        return sorted(files, key=lambda p: (len(p.relative_to(base).parts), str(p.relative_to(base)).lower()))
+
+    @staticmethod
+    def _ignored_in(folder: Path, asked: dict) -> set:
+        """The files in `folder` that git ignores: one `git check-ignore` call for the whole folder, not one per file."""
+        if folder in asked:
+            return asked[folder]
+        ignored: set[Path] = set()
+        try:
+            names = [p.name for p in folder.iterdir() if p.is_file()]
+            if names:
+                done = subprocess.run(["git", "-C", str(folder), "check-ignore", "--stdin", "-z"], input="\0".join(names) + "\0",
+                                      capture_output=True, text=True, timeout=10, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+                if done.returncode in (0, 1):                    # 1 means none of them is ignored
+                    ignored = {folder / n for n in done.stdout.split("\0") if n}
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        asked[folder] = ignored
+        return ignored
+
+    def _list_files(self, args):
+        base, root = self._dir(args.get("path"))
+        try:
+            limit = max(1, min(int(args.get("limit") or 100), 200))
+        except (TypeError, ValueError):
+            limit = 100
+        files = self._walk_files(base, root)
+        shown = [f.relative_to(base).as_posix() for f in files[:limit]]
+        if len(files) > limit:
+            shown.append(f"... and {len(files) - limit} more")
+        return ("\n".join(shown) or "(no text files found)"), f"Listed files in {_tilde(base)}"
+
+    def _search_text(self, args):
+        query = str(args.get("query") or "").strip()
+        if not query:
+            raise ToolError("no search query was given")
+        base, root = self._dir(args.get("path"))
+        low = query.lower()
+        hits: list[str] = []
+        for f in self._walk_files(base, root):
+            try:
+                if f.stat().st_size > READ_LIMIT:
+                    continue
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            rel = f.relative_to(base).as_posix()
+            for idx, line in enumerate(text.splitlines(), 1):
+                if low in line.lower():
+                    hits.append(f"{rel}:{idx}: {line.strip()[:160]}")
+                    if len(hits) >= 50:
+                        return "\n".join(hits) + "\n... (stopped at 50 matches)", f"Searched '{query}' in {_tilde(base)}"
+        return ("\n".join(hits) or f"(no matches for '{query}')"), f"Searched '{query}' in {_tilde(base)}"
 
     def _read_file(self, args):
         path = self._path(args.get("path"))
@@ -372,6 +602,12 @@ class Toolbox:
         if name == "copy_to_clipboard":
             return {"title": "Copy to clipboard", "content": arguments.get("text", ""), "exists": False, "diff": None,
                     "path": None}
+        if name == "edit_file":
+            path, old, content = self._edit_content(arguments)
+            diff = "".join(difflib.unified_diff(old.splitlines(True), content.splitlines(True), "before", "after", n=3))
+            why = runs_code(path)
+            return {"title": f"Edit {_tilde(path)}", "path": str(path), "exists": True, "content": content,
+                    "diff": diff, "warning": RUNS_CODE_WARNING.format(why=why) if why else None}
         path = self._path(arguments.get("path"), for_write=True)
         content, exists, diff = arguments.get("content", ""), path.exists(), None
         if exists:
@@ -390,13 +626,18 @@ class Toolbox:
                 ok = copy_to_clipboard(arguments["text"])
                 return {"ok": ok, "detail": "Copied to the clipboard" if ok else "Could not reach the clipboard",
                         "undo": None}
-            path = self._path(arguments["path"], for_write=True)
-            existed = path.exists()
-            previous = path.read_text(encoding="utf-8", errors="replace") if existed else None
-            data = arguments["content"].encode("utf-8")
+            if name == "edit_file":
+                path, previous, content = self._edit_content(arguments)
+                existed = True
+            else:
+                path = self._path(arguments["path"], for_write=True)
+                existed = path.exists()
+                previous = path.read_text(encoding="utf-8", errors="replace") if existed else None
+                content = arguments["content"]
+            data = content.encode("utf-8")
             with open(path, "wb") as f:
                 f.write(data)
-            return {"ok": True, "detail": f"Wrote {_tilde(path)}", "undo": {
+            return {"ok": True, "detail": f"{'Edited' if name == 'edit_file' else 'Wrote'} {_tilde(path)}", "undo": {
                 "path": str(path), "existed": existed, "previous": previous,
                 "written_sha": hashlib.sha256(data).hexdigest()}}
         except (ToolError, OSError) as e:

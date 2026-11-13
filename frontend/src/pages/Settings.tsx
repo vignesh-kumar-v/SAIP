@@ -8,6 +8,7 @@ import { post } from "../lib/api";
 import { useJson } from "../lib/hooks";
 import { useLive } from "../lib/store";
 import type { AppsPayload, Check, Settings as SettingsT } from "../lib/types";
+import { GATE_PRESETS } from "../lib/types";
 
 const SECTIONS = [
   ["model", "Model"],
@@ -232,6 +233,23 @@ function Behaviour({ s, reload }: { s: SettingsT; reload: () => void }) {
   const [flash, show] = useFlash();
   useEffect(() => setV(read()), [s]); // eslint-disable-line react-hooks/exhaustive-deps
   const dirty = NUMBERS.some((n) => v[`${n.section}.${n.key}`] !== String((s as any)[n.section][n.key]));
+
+  const currentM0 = Number((s as any).gate?.m0);
+  const activePreset = GATE_PRESETS.find((p) => Math.abs(p.gate.m0 - currentM0) < 0.05);
+
+  const applyPreset = async (p: (typeof GATE_PRESETS)[number]) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await post("/api/settings", { gate: p.gate });
+      show();
+      reload();
+    } catch (e: any) {
+      setErr(e.message);
+    }
+    setBusy(false);
+  };
+
   const save = async () => {
     const body: Record<string, Record<string, number>> = {};
     for (const n of NUMBERS) {
@@ -268,6 +286,41 @@ function Behaviour({ s, reload }: { s: SettingsT; reload: () => void }) {
         </div>
       }
     >
+      <div className="mb-6 rounded-xl border border-line bg-raised/30 p-4">
+        <div className="mb-2.5 flex items-center justify-between">
+          <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-faint">Sensitivity presets</span>
+          {!activePreset && <span className="rounded-md border border-line bg-canvas px-2 py-0.5 text-[11.5px] text-faint">Custom</span>}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {GATE_PRESETS.map((p) => {
+            const isCurrent = activePreset?.id === p.id;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => applyPreset(p)}
+                disabled={busy}
+                className={cx(
+                  "rounded-xl border px-3.5 py-1.5 text-[13px] font-medium transition-colors",
+                  isCurrent
+                    ? "border-flow bg-flow/15 text-flow shadow-sm"
+                    : "border-line bg-canvas text-muted hover:border-line-strong hover:text-ink"
+                )}
+              >
+                {p.name}
+              </button>
+            );
+          })}
+        </div>
+        <div className="mt-3 grid gap-2 sm:grid-cols-3 text-[12px]">
+          {GATE_PRESETS.map((p) => (
+            <div key={p.id} className={cx("rounded-lg p-2 transition-colors", activePreset?.id === p.id ? "bg-raised text-ink" : "text-faint")}>
+              <div className="font-medium text-ink">{p.name}</div>
+              <div className="mt-0.5 leading-snug">{p.caption}</div>
+            </div>
+          ))}
+        </div>
+      </div>
       <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
         {NUMBERS.map((n) => (
           <label key={n.key} className="grid grid-cols-[1fr_120px] items-center gap-3">

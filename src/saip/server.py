@@ -157,6 +157,8 @@ class Api:
                  on_ready=None, on_shutdown=None, offers=offers_payload, health=health_payload):
         self.bus, self.runtime, self.port = bus, runtime, port
         self._plat, self._aw = plat, aw
+        self._stops: dict[int, int] = {}                        # chat id -> how many times Stop was pressed
+        self._stops_lock = threading.Lock()
         self.on_ready, self.on_shutdown = on_ready, on_shutdown
         self.offers, self.health = offers, health
 
@@ -235,7 +237,25 @@ class Api:
             raise ApiError(404, "no such conversation")
         return self._view(c)
 
-    def chat_new(self, title: str | None = None) -> dict:
+    def chat(self, cid: int) -> dict:
+        from .chat_tools import mask_output
+        c = self._chats().get(cid)
+        if c is None:
+            raise ApiError(404, "no such conversation")
+        view = self._view(c)
+        ctx = c.get("context") or getattr(self.runtime, "last_context", "") or ""
+        scr = c.get("screen", "") or ""
+        if isinstance(scr, dict):
+            app = scr.get("app")
+            txt = scr.get("text", "")
+            scr_str = f"[{app}]\n{txt}" if app else txt
+        else:
+            scr_str = str(scr)
+        view["context"] = mask_output(ctx) if ctx else ""
+        view["screen"] = mask_output(scr_str) if scr_str else ""
+        return view
+
+    def chat_new(self, title: str | None = None, context: str | None = None, offer: str | None = None) -> dict:
         rt = self._chats() and self.runtime
         screen = None
         try:
@@ -243,8 +263,40 @@ class Api:
             screen = {"app": found.app, "text": found.text} if found is not None else None
         except Exception:
             screen = None
-        cid = rt.chats.create(title or "New chat", rt.snapshot_context() or rt.last_context, screen, live=True)
-        return self.chat_get(cid)
+        ctx = context if context is not None else (rt.snapshot_context() or rt.last_context)
+        chat_title = title
+        if not chat_title:
+            if offer:
+                chat_title = offer[:60]
+            else:
+                chat_title = "New chat"
+        cid = rt.chats.create(chat_title, ctx, screen, first=offer or None, live=context is None)
+        return self.chat(cid)
+
+    def chat_rename(self, cid: int | str, title: str) -> dict:
+        try:
+            c = self._chats().rename(cid, title)
+        except KeyError:
+            raise ApiError(404, "no such conversation") from None
+        except ValueError as e:
+            raise ApiError(400, str(e)) from None
+        return {"ok": True, "chat": self.chat(c["id"]), "chats": self.chats()["chats"]}
+
+    def _stop_count(self, cid: int) -> int:
+        with self._stops_lock:
+            return self._stops.get(cid, 0)
+
+    def chat_stop(self, cid: int | str | None = None) -> dict:
+        """Stop what the model is doing in this chat: its next tool or model call is not made, and whatever it was
+        about to write or propose is dropped, so the transcript stays as it was before the message. A model call
+        already waiting for an answer cannot be interrupted, but its answer is thrown away."""
+        try:
+            key = int(cid)
+        except (TypeError, ValueError):
+            return {"ok": True, "stopped": False}
+        with self._stops_lock:
+            self._stops[key] = self._stops.get(key, 0) + 1
+        return {"ok": True, "stopped": True}
 
     def _record(self, cid: int, wire: list, start: int | None, lead: list, out: dict) -> None:
         """Store what a model turn produced: its tool uses, a proposed action, its words."""
@@ -273,7 +325,9 @@ class Api:
 
     def _turn(self, cid: int, wire: list, toolbox) -> dict:
         from llm.chat import chat_turn
-        out = chat_turn(self.runtime.client, wire, toolbox.schemas(), toolbox.run)
+        pressed = self._stop_count(cid)
+        out = chat_turn(self.runtime.client, wire, toolbox.schemas(), toolbox.run,
+                        should_stop=lambda: self._stop_count(cid) != pressed)
         if out["tools_unsupported"]:
             try:
                 self.runtime.tools_unsupported = True
@@ -282,7 +336,7 @@ class Api:
         return out
 
     def chat_send(self, cid: int, message: str) -> dict:
-        from llm.chat import base_messages
+        from llm.chat import Stopped, base_messages
         from llm.client import LLMError
         from .chats import MAX_MESSAGE, Chats
         chats, rt = self._chats(), self.runtime
@@ -312,6 +366,8 @@ class Api:
         wire.append({"role": "user", "content": clean(text)})     # what was pasted may hide characters; the page keeps it
         try:
             out = self._turn(cid, wire, toolbox)
+        except Stopped:
+            return self.chat_get(cid)                           # nothing was recorded: the chat is as it was
         except LLMError as e:
             raise ApiError(502, f"the model did not answer: {e}") from None
         self._record(cid, out["messages"], start, [{"kind": "user", "text": text}], out)
@@ -326,7 +382,7 @@ class Api:
                            ". Check it is what you asked for, then confirm")
 
     def chat_action(self, cid: int, item_id: int, approve: bool, confirmed: bool = False) -> dict:
-        from llm.chat import tool_result_message
+        from llm.chat import Stopped, tool_result_message
         from llm.client import LLMError
         chats = self._chats()
         c = chats.get(cid)
@@ -355,7 +411,7 @@ class Api:
         wire = c["wire"] + [tool_result_message(item["_call"], result)]
         try:
             out = self._turn(cid, wire, toolbox)
-        except LLMError:
+        except (LLMError, Stopped):
             chats.set_wire(cid, wire)                           # the action stands; the next message continues from here
             return self.chat_get(cid)
         self._record(cid, out["messages"], None, [], out)
@@ -408,6 +464,18 @@ class Api:
     def inspector(self) -> dict:
         entries = list(self.runtime.inspector) if self.runtime else []
         return {"entries": entries[::-1]}
+
+    def inspector_feedback(self, entry_time: float, vote: str | None) -> dict:
+        if vote not in ("up", "down", None):
+            raise ApiError(400, "expected vote to be 'up', 'down', or null")
+        inspector = getattr(self.runtime, "inspector", None)
+        if inspector is not None:
+            for entry in inspector:
+                t = entry.get("time")
+                if t is not None and abs(float(t) - float(entry_time)) < 0.05:
+                    entry["feedback"] = vote
+                    break
+        return {"ok": True, "vote": vote}
 
     def settings(self) -> dict:
         from llm.config import load_settings
@@ -686,7 +754,7 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                     self._json({"error": "not found"}, 404)
                     return
                 if len(parts) == 3:
-                    self._reply(lambda: api.chat_get(cid))
+                    self._reply(lambda: api.chat(cid))
                     return
                 try:
                     item = int(q["item"])
@@ -801,6 +869,30 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
             if parts == ["api", "chats", "delete"]:
                 self._reply(lambda: api.chats_delete(b.get("ids")))
                 return
+            if parts == ["api", "chats", "rename"]:
+                cid = b.get("id")
+                title = b.get("title")
+                if cid is None or title is None:
+                    self._json({"error": "expected {\"id\": ..., \"title\": ...}"}, 400)
+                    return
+                self._reply(lambda: api.chat_rename(cid, title))
+                return
+            if parts == ["api", "chats", "stop"]:
+                self._reply(lambda: api.chat_stop(b.get("id")))
+                return
+            if parts == ["api", "inspector", "feedback"]:
+                time_val = b.get("time")
+                if time_val is None:
+                    self._json({"error": "missing 'time'"}, 400)
+                    return
+                try:
+                    t_float = float(time_val)
+                except (ValueError, TypeError):
+                    self._json({"error": "invalid 'time'"}, 400)
+                    return
+                vote = b.get("vote")
+                self._reply(lambda: api.inspector_feedback(t_float, vote))
+                return
             if parts[:2] == ["api", "chats"] and len(parts) > 2:
                 self._chat_post(parts, b)
                 return
@@ -813,7 +905,11 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 "/api/setup/hook": lambda: api.hook_action(*_need(body, "action")),
                 "/api/repos/preview": lambda: api.repo_preview(*_need(body, "folder")),
                 "/api/repos": lambda: api.repo_action(*_need(body, "action", "folder")),
-                "/api/chats": lambda: api.chat_new(b.get("title")),
+                "/api/chats": lambda: api.chat_new(
+                    b.get("title"),
+                    b.get("context"),
+                    b.get("offer") if isinstance(b.get("offer"), str) else (b.get("offer", {}).get("message") if isinstance(b.get("offer"), dict) else None)
+                ),
                 "/api/setup/finish": api.finish,
                 "/api/autostart": lambda: api.set_autostart(bool(_need(body, "enabled")[0])),
                 "/api/shutdown": api.shutdown,
