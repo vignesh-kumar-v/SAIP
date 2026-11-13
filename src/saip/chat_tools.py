@@ -390,7 +390,7 @@ class Toolbox:
             normed = [r for r in found if re.sub(r"[-_\s]+", "", r.name.lower()) == norm]
             if len(normed) == 1:
                 return normed[0]
-            partial = [r for r in found if str(r).lower().endswith("/" + low) or low in r.name.lower()]
+            partial = [r for r in found if r.as_posix().lower().endswith("/" + low) or low in r.name.lower()]
             if len(partial) == 1:
                 return partial[0]
             repo = next((r / repo for r in _roots(self.roots) if (r / repo).is_dir()), _roots(self.roots)[0] / repo)
@@ -506,7 +506,7 @@ class Toolbox:
         except (TypeError, ValueError):
             limit = 100
         files = self._walk_files(base, root)
-        shown = [str(f.relative_to(base)) for f in files[:limit]]
+        shown = [f.relative_to(base).as_posix() for f in files[:limit]]
         if len(files) > limit:
             shown.append(f"... and {len(files) - limit} more")
         return ("\n".join(shown) or "(no text files found)"), f"Listed files in {_tilde(base)}"
@@ -525,7 +525,7 @@ class Toolbox:
                 text = f.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            rel = f.relative_to(base)
+            rel = f.relative_to(base).as_posix()
             for idx, line in enumerate(text.splitlines(), 1):
                 if low in line.lower():
                     hits.append(f"{rel}:{idx}: {line.strip()[:160]}")
