@@ -172,6 +172,23 @@ limits hold whatever it asks:
   `.husky/`, `.pre-commit-config.yaml` and similar. The chat can still read them.
 - **Files that run code by themselves get a warning** on the approval card (shell scripts, `package.json`,
   `pyproject.toml`, `setup.py`, `conftest.py`, compose files), and the button reads **Approve anyway**.
+- **An action proposed after reading text needs a tick.** If the model read a file, a diff, commit messages, your
+  screen or a web page earlier in the chat, any copy or write it proposes lists what it read, and **Approve** stays
+  off until you tick "I checked this". Text like that can carry instructions meant to steer the model. SAIP enforces
+  this, not only the page, and saying no never needs it.
+- **Hidden characters are removed** from everything the model reads: files, diffs, web pages, screen text, typed
+  text, window titles and your own messages. These are zero-width characters, direction marks, and Unicode "tag"
+  characters, which can spell out whole instructions you cannot see. If tag characters spelled a message, the chat
+  shows you what it said. SAIP's checks also fold lookalike letters (Cyrillic "а", fullwidth "ｒｍ") back to plain
+  ones, so neither trick slips a command or phrase past them.
+- **Tool results are labelled.** The model gets each one inside `<tool_output>` tags naming its source, and is told
+  that text inside them is data, never instructions. Text that looks written to steer an AI ("ignore previous
+  instructions", "do not tell the user", a fake system message, an order to use one of its tools) is marked in the
+  chat, the model gets a note not to follow it, and the next action's card says which source had it.
+- **Replies are checked.** Code in a reply that deletes for good (`rm -rf`, `git reset --hard`, `DROP TABLE`), runs a
+  script from the internet (`curl … | sh`), uses `sudo`, force-pushes or switches off a macOS protection is listed
+  above the reply with the reason. A reply that says it saved a file or copied something when no approved action
+  shows it, or that it ran, committed, deleted or installed anything (which SAIP cannot do), is marked too.
 
 Chats are kept in memory and disappear when SAIP stops. To keep them, switch on **Keep chats between runs**
 (Settings → Saved chats). They are then saved to `chats.jsonl` in the settings folder, readable only by you. Turning

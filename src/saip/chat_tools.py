@@ -30,12 +30,18 @@ from pathlib import Path
 from . import repos as repos_mod
 from . import websearch
 from .screen import TOKEN_SECRETS, copy_to_clipboard
+from llm.checks import injection_signs
+from llm.sanitize import strip_hidden
 
 TEXT_EXTENSIONS = frozenset({".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".toml", ".yaml", ".yml",
                              ".html", ".css", ".csv", ".tex", ".sh", ".c", ".cpp", ".h", ".java", ".go", ".rs"})
 READ_LIMIT, WRITE_LIMIT, OUTPUT_LIMIT = 60_000, 200_000, 12_000
 READ_TOOLS = ("read_screen", "activity_summary", "git_log", "git_diff", "read_file", "web_search", "fetch_page")
 APPROVE_TOOLS = ("copy_to_clipboard", "write_file")
+# Tools whose result is text the person did not write for the model: it can carry instructions meant to steer it.
+# An action proposed after any of them (anywhere in the chat, since the model still remembers it) has to be
+# confirmed on purpose.
+UNTRUSTED_TOOLS = frozenset({"read_file", "git_diff", "git_log", "read_screen", "web_search", "fetch_page"})
 
 
 # Never read or written, whatever the model says. Matched against the file name, ignoring case.
@@ -264,7 +270,14 @@ class Toolbox:
                 self._check(name, args)
                 return {"kind": "approve", "preview": self.preview(name, args)}
             result, label = getattr(self, "_" + name)(args)
-            return {"kind": "read", "result": _cap(mask_output(result)), "label": label}
+            text, hidden = strip_hidden(result)
+            flag = injection_signs(text)
+            if hidden and hidden["message"]:
+                flag.insert(0, f"hides a message in invisible characters: \u201c{hidden['message'][:120]}\u201d")
+            out = {"kind": "read", "result": _cap(mask_output(text)), "label": label}
+            if flag:
+                out["flag"] = flag
+            return out
         except (ToolError, websearch.SearchError) as e:
             return {"kind": "error", "result": str(e), "label": f"Could not use {name}: {e}"[:120]}
         except Exception as e:                                  # a tool must never take the chat down

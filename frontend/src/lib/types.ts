@@ -199,6 +199,7 @@ export type ChatAction = {
   diff: string | null;
   exists: boolean;
   warning?: string | null;
+  after?: string[];
   state: ActionState;
   detail?: string;
   undoable: boolean;
@@ -208,9 +209,12 @@ export type ChatItem = {
   kind: "user" | "assistant" | "tool" | "action";
   at: number;
   text: string;
-  tool?: { name: string; label: string; ok: boolean };
+  tool?: { name: string; label: string; ok: boolean; flag?: string[] | null };
   action?: ChatAction;
+  risky?: RiskyCommand[];
+  claim?: string | null;
 };
+export type RiskyCommand = { command: string; why: string };
 export type ChatMessage = { role: "user" | "assistant"; text: string; at: number };
 export type ChatView = {
   id: number;

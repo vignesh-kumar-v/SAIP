@@ -199,12 +199,13 @@ class DemoApi(Api):
                      {"events": events, "pending": pending, "text": words})
         return self.chat_get(cid)
 
-    def chat_action(self, cid, item_id, approve):
+    def chat_action(self, cid, item_id, approve, confirmed=False):
         chats = self.runtime.chats
         c = chats.get(cid)
         item = None if c is None else next((i for i in c["items"] if i["id"] == item_id and i["kind"] == "action"), None)
         if item is None:
             raise ApiError(404, "no such action")
+        self._needs_confirming(item, approve, confirmed)
         if not chats.claim_action(cid, item_id):
             raise ApiError(409, "that action was already decided")
         time.sleep(0.6)

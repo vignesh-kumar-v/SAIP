@@ -250,14 +250,20 @@ class Api:
         """Store what a model turn produced: its tool uses, a proposed action, its words."""
         items = list(lead)
         for e in out["events"]:
-            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"]}})
+            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"],
+                                                                        "flag": e.get("flag")}})
         p = out["pending"]
         if p:
+            from .chat_tools import UNTRUSTED_TOOLS
             pv = p["preview"]
+            seen = self.runtime.chats.get(cid)
+            read = [i["tool"] for i in (seen["items"] if seen else []) if i["kind"] == "tool"] + out["events"]
+            after = list(dict.fromkeys(t["label"] + (" (has text aimed at the model)" if t.get("flag") else "")
+                                       for t in read if t.get("ok") and t.get("name") in UNTRUSTED_TOOLS))
             items.append({"kind": "action", "text": pv.get("title") or p["name"], "_call": p["call_id"], "_args": p["arguments"],
                           "action": {"name": p["name"], "title": pv.get("title") or p["name"], "path": pv.get("path"),
                                      "content": pv.get("content"), "diff": pv.get("diff"), "exists": bool(pv.get("exists")),
-                                     "warning": pv.get("warning"),
+                                     "warning": pv.get("warning"), "after": after[-6:],
                                      "state": "pending", "detail": None}})
         if out["text"]:
             items.append({"kind": "assistant", "text": out["text"]})
@@ -302,7 +308,8 @@ class Api:
             if c.get("first"):
                 wire.append({"role": "assistant", "content": c["first"]})
         start = len(wire)
-        wire.append({"role": "user", "content": text})
+        from llm.sanitize import clean
+        wire.append({"role": "user", "content": clean(text)})     # what was pasted may hide characters; the page keeps it
         try:
             out = self._turn(cid, wire, toolbox)
         except LLMError as e:
@@ -310,7 +317,15 @@ class Api:
         self._record(cid, out["messages"], start, [{"kind": "user", "text": text}], out)
         return self.chat_get(cid)
 
-    def chat_action(self, cid: int, item_id: int, approve: bool) -> dict:
+    @staticmethod
+    def _needs_confirming(item: dict, approve: bool, confirmed: bool) -> None:
+        """An action proposed after the model read text it was given (files, diffs, the screen, the web) may have been
+        steered by that text, so approving it needs `confirmed` as well: the page asks the person to tick a box."""
+        if approve and item["action"].get("after") and not confirmed and item["action"]["state"] == "pending":
+            raise ApiError(409, "this was proposed after reading " + "; ".join(item["action"]["after"]) +
+                           ". Check it is what you asked for, then confirm")
+
+    def chat_action(self, cid: int, item_id: int, approve: bool, confirmed: bool = False) -> dict:
         from llm.chat import tool_result_message
         from llm.client import LLMError
         chats = self._chats()
@@ -318,6 +333,7 @@ class Api:
         item = None if c is None else next((i for i in c["items"] if i["id"] == item_id and i["kind"] == "action"), None)
         if item is None:
             raise ApiError(404, "no such action")
+        self._needs_confirming(item, approve, confirmed)
         if item["action"]["state"] != "pending" or not chats.claim_action(cid, item_id):
             raise ApiError(409, "that action was already decided")
         if getattr(self.runtime, "client", None) is None:
@@ -728,7 +744,7 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 if not isinstance(b.get("approve"), bool):
                     self._json({"error": "expected {\"approve\": true or false}"}, 400)
                     return
-                self._reply(lambda: api.chat_action(cid, item, b["approve"]))
+                self._reply(lambda: api.chat_action(cid, item, b["approve"], b.get("confirmed") is True))
             else:
                 self._json({"error": "not found"}, 404)
 
