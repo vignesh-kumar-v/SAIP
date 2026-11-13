@@ -8,10 +8,18 @@ Two things are looked for in a reply, and shown to the person as warnings beside
 * Claims that did not happen: "I've saved the file", "I copied it to your clipboard", "I ran the tests". SAIP's model
   can only propose a file write or a clipboard copy, which happen once the person approves; it can never run
   commands, commit, push, delete or install. A claim is compared with the actions of the same reply.
+
+And one thing is looked for in what tools return (files, diffs, the screen, web pages): signs of text written to
+steer an AI rather than inform a person ("ignore previous instructions", "do not tell the user", a fake system
+message, a tool named in an order). Such text is labelled for the model and shown to the person.
+
+All matching runs on `sanitize.for_matching`, so hidden characters and lookalike letters do not get past it.
 """
 from __future__ import annotations
 
 import re
+
+from .sanitize import for_matching
 
 # (pattern, why it is risky). Matched against each line of code in a reply.
 RISKY = [
@@ -53,7 +61,7 @@ def code_lines(text: str) -> list[str]:
 def risky_commands(text: str) -> list[dict]:
     """[{"command", "why"}] for each line of code that matches, in order, without repeats."""
     out, seen = [], set()
-    for line in code_lines(text or ""):
+    for line in code_lines(for_matching(text or "")):
         for pat, why in RISKY:
             if pat.search(line):
                 command = line.removeprefix("$ ")[:160]
@@ -104,4 +112,37 @@ def unbacked_claim(text: str, approved: set[str], pending: set[str]) -> str | No
     return None
 
 
-__all__ = ["RISKY", "code_lines", "risky_commands", "unbacked_claim"]
+# ---- text aimed at the model ---------------------------------------------------------------------------------------
+_AI = r"(?:ai|a\.i\.|assistant|chatbot|bot|llm|language model|model|agent|claude|chatgpt|gpt|qwen|llama|copilot)"
+_INJECTION = [
+    (re.compile(r"\b(?:ignore|disregard|forget|override|bypass)\s+(?:all\s+|any\s+|the\s+|your\s+|these\s+|those\s+)*"
+                r"(?:previous|prior|above|earlier|preceding|original|system|initial)\s+(?:instructions?|prompts?|messages?|"
+                r"rules|directions|guidelines|context)"), "tells the model to ignore its instructions"),
+    (re.compile(r"\b(?:do\s+not|don'?t|never)\s+(?:tell|inform|mention\s+(?:this\s+)?to|alert|reveal\s+(?:this\s+)?to|"
+                r"notify)\s+(?:the\s+)?(?:user|person|human|operator)\b"), "tells the model to keep something from you"),
+    (re.compile(r"(?:<\|im_start\|>|<\|start_header_id\|>|\[/?inst\]|<<sys>>|</?system>|^\s*#{1,4}\s*system\b|"
+                r"^\s*(?:system|assistant)\s*(?:prompt|message|instructions?)?\s*:)"), "imitates a system or assistant message"),
+    (re.compile(rf"\b(?:if\s+you\s+are|you\s+are\s+now)\s+(?:an?\s+)?(?:[a-z-]+\s+){{0,3}}{_AI}\b"), "addresses an AI directly"),
+    (re.compile(r"\bas\s+an?\s+(?:ai|llm|large\s+language\s+model|language\s+model|ai\s+assistant)\b"), "addresses an AI directly"),
+    (re.compile(rf"\b(?:attention|note|important|message)\s*(?:to|for)\s+(?:the\s+|any\s+)?{_AI}\b"), "addresses an AI directly"),
+    (re.compile(r"\b(?:new|updated|real|actual)\s+(?:system\s+)?instructions?\s*:"), "claims to give the model new instructions"),
+    (re.compile(r"(?:^|[.!?:;]\s*|\b(?:please|now|must|should|immediately)\s+)"        # said as an order, not "you can call"
+                r"(?:call|use|run|invoke|execute)\s+(?:the\s+)?`?(?:write_file|copy_to_clipboard|fetch_page|web_search|read_file)"
+                r"`?(?:\s+tool)?\b"), "tells the model to use one of its tools"),
+]
+
+
+INJECTION = [(re.compile(p.pattern, re.M), why) for p, why in _INJECTION]       # ^ marks a line start
+
+
+def injection_signs(text: str) -> list[str]:
+    """The reasons text from a tool looks written to steer the model, without repeats ([] for ordinary text)."""
+    plain = for_matching(text or "").lower()
+    found = []
+    for pat, why in INJECTION:
+        if why not in found and pat.search(plain):
+            found.append(why)
+    return found
+
+
+__all__ = ["INJECTION", "RISKY", "code_lines", "injection_signs", "risky_commands", "unbacked_claim"]

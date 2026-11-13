@@ -137,10 +137,21 @@ export function ToolLine({ item }: { item: ChatItem }) {
   const t = item.tool;
   const Icon = toolIcon(t?.name ?? "");
   const ok = t?.ok !== false;
+  const flag = t?.flag ?? [];
   return (
-    <div className={cx("flex items-center justify-center gap-1.5 px-4 text-[12px]", ok ? "text-faint" : "text-stuck")}>
-      <Icon size={13} className="shrink-0" />
-      <span className="min-w-0 truncate">{t?.label || item.text}</span>
+    <div className="px-4">
+      <div className={cx("flex items-center justify-center gap-1.5 text-[12px]", ok ? "text-faint" : "text-stuck")}>
+        <Icon size={13} className="shrink-0" />
+        <span className="min-w-0 truncate">{t?.label || item.text}</span>
+      </div>
+      {flag.length > 0 && (
+        <div role="note" className="mx-auto mt-1.5 flex max-w-[min(560px,92%)] items-start gap-2 rounded-xl border border-stuck/40 bg-stuck-soft px-3 py-2 text-[12px] leading-relaxed text-ink">
+          <ShieldAlert size={14} className="mt-0.5 shrink-0 text-stuck" />
+          <span>
+            This text looks written to steer the model: {flag.join("; ")}. SAIP told the model not to follow it.
+          </span>
+        </div>
+      )}
     </div>
   );
 }

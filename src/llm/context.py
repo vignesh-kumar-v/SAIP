@@ -16,6 +16,7 @@ from classifier.categories import category, window_key
 from classifier.loader import Trace
 
 from .privacy import is_blocked
+from .sanitize import clean
 
 MIN_DWELL_S = 2.0
 MAX_TIMELINE = 15
@@ -87,4 +88,4 @@ def build_context(trace: Trace, t_end: float, lookback_s: float = 300.0, include
         lines.append(f"Commits: {commits}.")
     else:
         lines.append("Terminal and commits: not monitored.")
-    return "\n".join(lines)
+    return clean("\n".join(lines))                                  # window titles are written by whatever is open
