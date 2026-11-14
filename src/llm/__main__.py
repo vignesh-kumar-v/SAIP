@@ -31,7 +31,8 @@ def cmd_replay(a) -> int:
             return 2
     print(note)
     try:
-        rows = run_replay(client, settings, temps, Path(a.data), users, not a.no_hooks, a.stride, a.max_assess)
+        rows = run_replay(client, settings, temps, Path(a.data), users, not a.no_hooks, a.stride, a.max_assess,
+                          all_ticks=a.all_ticks)
     except LLMError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -74,6 +75,8 @@ def main(argv=None) -> int:
     r.add_argument("--calibration", help="where temperatures are read and saved")
     r.add_argument("--config", help="path to private.toml")
     r.add_argument("--out", help="write per-tick rows as jsonl")
+    r.add_argument("--all-ticks", action="store_true",
+                   help="assess every sampled tick, not only those above the classifier's trigger (for `python -m llm.compare`)")
     r.set_defaults(fn=cmd_replay)
     g = sub.add_parser("gate", help="show the bar for a grid of stuck scores")
     g.add_argument("--p-need", type=float, default=0.6)

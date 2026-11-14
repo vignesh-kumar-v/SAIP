@@ -66,10 +66,15 @@ class Row:
     tau: float
     resampled: bool
     calls: int
+    theta: float = 0.0           # the classifier's trigger for this day's profile (what `llm.compare` gates on)
 
 
-def sample_ticks(data: Path, users, use_hooks: bool, stride_s: float, max_assess: int):
-    """Yield (day, trace, tick index, trigger threshold) for ticks the classifier would hand to the LLM."""
+def sample_ticks(data: Path, users, use_hooks: bool, stride_s: float, max_assess: int, all_ticks: bool = False):
+    """Yield (day, trace, tick index, trigger threshold) for ticks the classifier would hand to the LLM.
+
+    With all_ticks, every scored tick on the stride is yielded, triggered or not. That is what a comparison with
+    PRISM needs: PRISM has no classifier in front of it and judges every event (see docs/PRISM_Comparison.md).
+    """
     index = json.loads((data / "index.json").read_text(encoding="utf-8"))
     picks = []
     for rec in index:
@@ -79,7 +84,7 @@ def sample_ticks(data: Path, users, use_hooks: bool, stride_s: float, max_assess
         theta = load_weights("with_hooks" if day.series.hooks and use_hooks else "window_input_afk").threshold
         step = max(1, int(stride_s / 5.0))
         idx = [i for i in range(0, len(day.score), step)
-               if day.series.pause[i] == SCORING and day.score[i] >= theta]
+               if day.series.pause[i] == SCORING and (all_ticks or day.score[i] >= theta)]
         picks.append((rec, day, theta, idx))
     flat = [(k, i) for k, (_, _, _, idx) in enumerate(picks) for i in idx]
     if len(flat) > max_assess:
@@ -91,15 +96,15 @@ def sample_ticks(data: Path, users, use_hooks: bool, stride_s: float, max_assess
 
 
 def run_replay(client: ChatClient, settings: Settings, temps: dict, data: Path, users, use_hooks=True,
-               stride_s=120.0, max_assess=200) -> list[Row]:
+               stride_s=120.0, max_assess=200, all_ticks=False) -> list[Row]:
     rows: list[Row] = []
     traces: dict = {}
-    for day, trace, i, _ in sample_ticks(data, users, use_hooks, stride_s, max_assess):
+    for day, trace, i, theta in sample_ticks(data, users, use_hooks, stride_s, max_assess, all_ticks):
         t = float(day.series.times[i])
         ctx = build_context(trace, t, settings.llm.lookback_s, settings.llm.include_titles, settings.llm.private_apps)
         a: Assessment = assess(client, settings, temps, ctx, float(day.score[i]))
         rows.append(Row(day.user, t, str(day.state[i]), float(day.score[i]), a.p_need_raw, a.p_accept_raw,
-                        a.decision.action, a.decision.tau, a.resampled, a.calls))
+                        a.decision.action, a.decision.tau, a.resampled, a.calls, float(theta)))
     return rows
 
 
