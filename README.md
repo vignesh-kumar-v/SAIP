@@ -139,6 +139,8 @@ The **Chat** page is a normal conversation, and it knows what you were doing in 
 
 - reply to one earlier message, or just part of it (select text and press **Reply to this part**);
 - **edit** one of your messages and send it again, or **rewind** to it, which removes everything after it;
+- **delete** chats you no longer want: hover over one in the list and press the bin, or press **Select**, tick several
+  and press **Delete**. Files a chat wrote stay as they are;
 - ask it to use tools (below). Replies are shown with Markdown: code in boxes with a Copy button, lists, bold.
 
 **Chat tools** (Settings → Chat tools):
@@ -147,16 +149,50 @@ The **Chat** page is a normal conversation, and it knows what you were doing in 
 |---|---|---|
 | Read your screen | The text near your cursor in the front app | No |
 | Activity summary | What you did in the last few minutes | No |
-| Git log and diff | Recent commits and uncommitted changes in your watched repositories | No |
-| Read a file | Text and code files inside your watched folders only | No |
+| Repositories and git | List the watched repositories, and show git status, recent commits and uncommitted changes | No |
+| Find and read files | List and search text files, and read one, inside your watched folders only. Never secret files or files git ignores | No |
 | Web search and open a page | DuckDuckGo by default, or Brave or Tavily with a key. **Off until you switch it on.** | No |
 | Copy to clipboard | Puts text you can see on your clipboard | **Yes** |
-| Write a file | Plain-text and code files inside your watched folders only. You see the whole file, or the changes if it exists. | **Yes** |
+| Write or edit a file | Plain-text and code files inside your watched folders only. You see the whole file, or the changes if it exists. Existing files that git ignores cannot be edited. | **Yes** |
 
 It cannot write into other apps, make git commits, run commands, or touch anything inside `.git`. It can only
-propose; nothing happens until you press **Approve**. **Rewind puts written files back as they were**. A file you
+propose; nothing happens until you press **Approve**. An action proposed after it read a file, a diff, the screen or a
+web page needs a second tick ("I checked this"), because that text may have been written to steer it. **Stop** ends
+the reply: the model's next step is not taken and what it was about to say is dropped (a model call already waiting
+for an answer cannot be interrupted, but its answer is thrown away). **Rewind puts written and edited files back as
+they were**. A file you
 changed yourself in the meantime is left alone, and a clipboard copy or a web search cannot be undone (the dialog tells
 you before you confirm).
+
+Because the model may be small and can be talked round (by you, or by text it reads in a file or web page), some
+limits hold whatever it asks:
+
+- **Secret files are off limits**, for reading and writing: keys (`*.pem`, `id_rsa`, `.ssh/`, `.aws/`), `.env` files,
+  `secrets.*`, `credentials.*`, service-account files and SAIP's own `private.toml`. Files git ignores are not read
+  either, since that is where secrets usually live.
+- **Everything a tool returns is masked** the same way as screen text (below). A write that would put `[hidden]` into
+  a file is refused, so a masked secret is never written over the real one.
+- **CI and editor settings are never written**: `.github/`, `.gitlab-ci.yml`, `.circleci/`, `.vscode/`, `.idea/`,
+  `.husky/`, `.pre-commit-config.yaml` and similar. The chat can still read them.
+- **Files that run code by themselves get a warning** on the approval card (shell scripts, `package.json`,
+  `pyproject.toml`, `setup.py`, `conftest.py`, compose files), and the button reads **Approve anyway**.
+- **An action proposed after reading text needs a tick.** If the model read a file, a diff, commit messages, your
+  screen or a web page earlier in the chat, any copy or write it proposes lists what it read, and **Approve** stays
+  off until you tick "I checked this". Text like that can carry instructions meant to steer the model. SAIP enforces
+  this, not only the page, and saying no never needs it.
+- **Hidden characters are removed** from everything the model reads: files, diffs, web pages, screen text, typed
+  text, window titles and your own messages. These are zero-width characters, direction marks, and Unicode "tag"
+  characters, which can spell out whole instructions you cannot see. If tag characters spelled a message, the chat
+  shows you what it said. SAIP's checks also fold lookalike letters (Cyrillic "а", fullwidth "ｒｍ") back to plain
+  ones, so neither trick slips a command or phrase past them.
+- **Tool results are labelled.** The model gets each one inside `<tool_output>` tags naming its source, and is told
+  that text inside them is data, never instructions. Text that looks written to steer an AI ("ignore previous
+  instructions", "do not tell the user", a fake system message, an order to use one of its tools) is marked in the
+  chat, the model gets a note not to follow it, and the next action's card says which source had it.
+- **Replies are checked.** Code in a reply that deletes for good (`rm -rf`, `git reset --hard`, `DROP TABLE`), runs a
+  script from the internet (`curl … | sh`), uses `sudo`, force-pushes or switches off a macOS protection is listed
+  above the reply with the reason. A reply that says it saved a file or copied something when no approved action
+  shows it, or that it ran, committed, deleted or installed anything (which SAIP cannot do), is marked too.
 
 Chats are kept in memory and disappear when SAIP stops. To keep them, switch on **Keep chats between runs**
 (Settings → Saved chats). They are then saved to `chats.jsonl` in the settings folder, readable only by you. Turning
@@ -200,7 +236,8 @@ Some protections apply everywhere:
 - **One block list.** Apps on it are never named to the model, nothing typed in them is kept, and their screen text
   is never read. It is matched by whole words, ignoring case and `.exe` or `.app`, so "Chrome" blocks "Google Chrome"
   but "Mail" does not block "Gmail". Settings lists the apps installed on your machine to pick from.
-- **Secrets are masked** before text goes to the model: keys and tokens (such as `sk-…`, `ghp_…`, `AKIA…`),
+- **Secrets are masked** before text goes to the model, in screen text, typed text and everything a chat tool
+  returns: keys and tokens (such as `sk-…`, `ghp_…`, `AKIA…`),
   `password:` and `api_key=` lines, and long random-looking strings. This is pattern-based, so it is a safety net, not a
   guarantee.
 - **The block list works per app, not per field.** macOS hides keys from SAIP while a password box has focus, but

@@ -1,11 +1,13 @@
-import { Keyboard, ScanSearch } from "lucide-react";
+import { Keyboard, MessageSquarePlus, ScanSearch, ThumbsDown, ThumbsUp } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState } from "react";
-import { Card, Empty, Pill, cx } from "../components/ui";
+import { Button, Card, Empty, Pill, cx } from "../components/ui";
+import { post } from "../lib/api";
 import { clockS, two } from "../lib/format";
 import { useJson } from "../lib/hooks";
+import { navigate } from "../lib/router";
 import { useLive } from "../lib/store";
-import type { InspectorEntry } from "../lib/types";
+import type { ChatView, InspectorEntry } from "../lib/types";
 
 /** Highlight the parts of the context that came from the optional readers. */
 function ContextText({ text }: { text: string }) {
@@ -29,8 +31,42 @@ export function Inspector() {
   const { data } = useJson<{ entries: InspectorEntry[] }>(`/api/inspector?v=${count}`);
   const entries = data?.entries || [];
   const [sel, setSel] = useState(0);
+  const [votes, setVotes] = useState<Record<number, "up" | "down" | null>>({});
+  const [creatingChat, setCreatingChat] = useState(false);
   useEffect(() => setSel(0), [entries.length]);
   const e = entries[sel];
+
+  const currentVote = e ? (votes[e.time] !== undefined ? votes[e.time] : (e.feedback ?? null)) : null;
+
+  const handleFeedback = async (vote: "up" | "down") => {
+    if (!e) return;
+    const newVote = currentVote === vote ? null : vote;
+    setVotes((prev) => ({ ...prev, [e.time]: newVote }));
+    try {
+      await post("/api/inspector/feedback", { time: e.time, vote: newVote });
+    } catch (err) {
+      console.error("Failed to post feedback:", err);
+    }
+  };
+
+  const continueInChat = async () => {
+    if (!e) return;
+    setCreatingChat(true);
+    try {
+      const offerMsg = e.offer ? (typeof e.offer === "string" ? e.offer : e.offer.message) : undefined;
+      const title = offerMsg ? offerMsg.slice(0, 60) : `Check at ${clockS(e.time)} (${e.app || "activity"})`;
+      const res = await post<ChatView>("/api/chats", {
+        title,
+        context: e.context,
+        offer: offerMsg,
+      });
+      navigate(`/chat?session=${res.id}`);
+    } catch (err) {
+      console.error("Failed to create chat from inspector:", err);
+    } finally {
+      setCreatingChat(false);
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -71,6 +107,50 @@ export function Inspector() {
           <AnimatePresence mode="wait">
             {e && (
               <motion.div key={e.time + e.decision} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: 0.2 }} className="min-w-0 space-y-5">
+                <Card className="flex flex-wrap items-center justify-between gap-3 p-4">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    busy={creatingChat}
+                    onClick={continueInChat}
+                    className="gap-2"
+                  >
+                    <MessageSquarePlus size={15} /> Continue in Chat
+                  </Button>
+                  <div className="flex items-center gap-2">
+                    <span className="mr-1 text-[12px] text-faint" title="Only a note for now: it is kept until SAIP stops and does not change what SAIP does or how it is calibrated.">
+                      Your note (kept until SAIP stops, changes nothing):
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleFeedback("up")}
+                      aria-label="Good call"
+                      aria-pressed={currentVote === "up"}
+                      className={cx(
+                        "flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium transition-colors focus:outline-none",
+                        currentVote === "up"
+                          ? "border-flow bg-flow/15 text-flow"
+                          : "border-line bg-canvas text-muted hover:border-line-strong hover:text-ink"
+                      )}
+                    >
+                      <ThumbsUp size={13} /> Good call
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleFeedback("down")}
+                      aria-label="Bad timing"
+                      aria-pressed={currentVote === "down"}
+                      className={cx(
+                        "flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium transition-colors focus:outline-none",
+                        currentVote === "down"
+                          ? "border-danger bg-danger/15 text-danger"
+                          : "border-line bg-canvas text-muted hover:border-line-strong hover:text-ink"
+                      )}
+                    >
+                      <ThumbsDown size={13} /> Bad timing
+                    </button>
+                  </div>
+                </Card>
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                   {[
                     ["stuck score", two(e.score)],

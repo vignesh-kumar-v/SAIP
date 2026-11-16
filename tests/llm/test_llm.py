@@ -350,3 +350,139 @@ def test_replay_runs_end_to_end_on_a_generated_day(tmp_path):
     assert "state-aware gate" in text and "AUROC" in text
     if len({r.state == "stuck" for r in rows}) == 2:
         assert set(fit_temps(rows)) == {"need", "accept"}
+
+
+def test_list_models_parses_openai_models_response(monkeypatch):
+    import io
+    import json
+    import urllib.request
+    from llm.client import list_models
+
+    captured = {}
+
+    class FakeResp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=10.0):
+        captured["url"] = req.full_url
+        captured["auth"] = req.headers.get("Authorization")
+        payload = {"data": [{"id": "model-a"}, {"id": "model-b"}, {"id": "model-a"}]}
+        return FakeResp(json.dumps(payload).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert list_models("http://host:8000/v1/", api_key="secret") == ["model-a", "model-b"]
+    assert captured == {"url": "http://host:8000/v1/models", "auth": "Bearer secret"}
+
+
+def test_server_test_endpoint_auto_detects_single_and_multiple_models(monkeypatch):
+    from saip import setup
+    from saip.server import Api
+
+    api = Api(bus=None, plat=type("P", (), {"name": "darwin"})())
+
+    # Single model -> auto-selects and checks endpoint
+    monkeypatch.setattr("llm.client.list_models", lambda *a, **kw: ["prism-festinalente/Qwen3-8B-PRISM"])
+    monkeypatch.setattr(setup, "check_endpoint", lambda trial: setup.Result("LLM endpoint", "ok", f"ok {trial.llm.model}"))
+    res = api.test_endpoint("http://host:8000/v1", "", "k")
+    assert res["ok"] is True
+    assert res["model"] == "prism-festinalente/Qwen3-8B-PRISM"
+    assert res["models"] == ["prism-festinalente/Qwen3-8B-PRISM"]
+
+    # Multiple models -> returns choices without probing
+    monkeypatch.setattr("llm.client.list_models", lambda *a, **kw: ["m1", "m2"])
+    res_multi = api.test_endpoint("http://host:8000/v1", "", None)
+    assert res_multi["ok"] is False
+    assert res_multi["models"] == ["m1", "m2"]
+
+
+def test_server_test_endpoint_retries_with_reasoning_effort_none(monkeypatch, tmp_path):
+    from saip import setup
+    from saip.server import Api, _classify
+
+    empty = tmp_path / "empty.toml"                       # test_endpoint reads the settings: never the real private.toml
+    empty.write_text("")
+    monkeypatch.setenv("SAIP_CONFIG", str(empty))
+    for name in ("SAIP_LLM_BASE_URL", "SAIP_LLM_MODEL", "SAIP_LLM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    api = Api(bus=None, plat=type("P", (), {"name": "darwin"})())
+
+    def fake_check(trial):
+        if trial.llm.reasoning_effort == "none":
+            return setup.Result("LLM endpoint", "ok", "ok")
+        return setup.Result("LLM endpoint", "failed", "neither 'yes' nor 'no' appears among the top log-probabilities of the first token")
+
+    monkeypatch.setattr(setup, "check_endpoint", fake_check)
+    res = api.test_endpoint("http://host:8000/v1", "Qwen/Qwen3-8B-PRISM", None)
+    assert res["ok"] is True
+    assert res["reasoning_effort"] == "none"
+    assert "thinking mode" in _classify("neither 'yes' nor 'no' appears among the top log-probabilities")
+
+
+def test_server_chat_api_methods():
+    from collections import deque
+    from types import SimpleNamespace
+    from saip.chats import Chats
+    from saip.server import Api, ApiError
+
+    rt = SimpleNamespace(
+        chats=Chats(),
+        client=None,
+        last_context="Default activity.",
+        look=lambda: None,
+        snapshot_context=lambda: "Snapshot activity.",
+        inspector=deque(),
+        running=True,
+    )
+    api = Api(bus=None, plat=type("P", (), {"name": "darwin"})(), runtime=rt)
+
+    # 1. chat_new with context and offer
+    c1 = api.chat_new(title="Custom Title", context="Activity in VS Code", offer="Would you like help with debugging?")
+    assert c1["title"] == "Custom Title"
+    assert c1["context"] == "Activity in VS Code"
+    assert len(c1["items"]) == 1
+    assert c1["items"][0]["kind"] == "assistant"
+    assert c1["items"][0]["text"] == "Would you like help with debugging?"
+
+    # chat_new with offer only (derives title)
+    c2 = api.chat_new(offer="Need assistance with tests?")
+    assert c2["title"] == "Need assistance with tests?"
+    assert c2["context"] == "Snapshot activity."
+    assert c2["items"][0]["text"] == "Need assistance with tests?"
+
+    # 2. chat_rename
+    res_rename = api.chat_rename(c1["id"], "Renamed Conversation")
+    assert res_rename["ok"] is True
+    assert res_rename["chat"]["title"] == "Renamed Conversation"
+    assert any(ch["id"] == c1["id"] and ch["title"] == "Renamed Conversation" for ch in res_rename["chats"])
+
+    # chat_rename validation
+    with pytest.raises(ApiError) as exc_empty:
+        api.chat_rename(c1["id"], "   ")
+    assert exc_empty.value.code == 400
+
+    with pytest.raises(ApiError) as exc_404:
+        api.chat_rename(999999, "Valid Title")
+    assert exc_404.value.code == 404
+
+    # 3. chat_stop
+    assert api.chat_stop(c1["id"])["ok"] is True
+
+    # 4. inspector_feedback
+    entry1 = {"time": 100.5, "decision": "offer", "context": "ctx1"}
+    entry2 = {"time": 200.0, "decision": "quiet", "context": "ctx2"}
+    rt.inspector.append(entry1)
+    rt.inspector.append(entry2)
+
+    fb_res = api.inspector_feedback(100.5, "up")
+    assert fb_res == {"ok": True, "vote": "up"}
+    assert entry1.get("feedback") == "up"
+
+    fb_clear = api.inspector_feedback(100.5, None)
+    assert fb_clear == {"ok": True, "vote": None}
+    assert entry1.get("feedback") is None
+
+    with pytest.raises(ApiError) as exc_invalid_vote:
+        api.inspector_feedback(100.5, "invalid")
+    assert exc_invalid_vote.value.code == 400

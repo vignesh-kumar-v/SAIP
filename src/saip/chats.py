@@ -20,7 +20,7 @@ from pathlib import Path
 MAX_CHATS = 20
 MAX_MESSAGE = 4000
 WEB_TOOLS = {"web_search": "A web search", "fetch_page": "A page that was opened"}
-ACTION_FIELDS = ("name", "title", "path", "content", "diff", "exists", "state", "detail")
+ACTION_FIELDS = ("name", "title", "path", "content", "diff", "exists", "warning", "after", "state", "detail")
 
 
 def _undo_write(undo: dict) -> tuple[bool, str]:
@@ -67,6 +67,15 @@ class Chats:
             self._save()
             return n
 
+    def delete(self, ids) -> int:
+        """Forget the conversations with these ids (and save). Ids that are already gone are ignored.
+        Files a chat wrote stay as they are: deleting a chat is not a rewind."""
+        with self._lock:
+            gone = [cid for cid in set(ids) if self._chats.pop(cid, None) is not None]
+            if gone:
+                self._save()
+            return len(gone)
+
     def _load(self) -> None:
         try:
             lines = self._path.read_text(encoding="utf-8").splitlines()
@@ -108,7 +117,8 @@ class Chats:
                                 "screen": screen, "live": live, "first": first or None, "items": [], "wire": [],
                                 "next_item": 1}
             for e in looked or []:
-                self._append(self._chats[cid], "tool", e["label"], tool={"name": e["name"], "label": e["label"], "ok": e["ok"]})
+                self._append(self._chats[cid], "tool", e["label"], tool={"name": e["name"], "label": e["label"], "ok": e["ok"],
+                                                                           "flag": e.get("flag")})
             if first:
                 self._append(self._chats[cid], "assistant", first)
             for old in sorted(self._chats)[:-MAX_CHATS]:
@@ -123,12 +133,37 @@ class Chats:
         c["items"].append(item)
         return item
 
+    def rename(self, cid: int | str, title: str) -> dict:
+        t = str(title or "").strip()[:80]
+        if not t:
+            raise ValueError("Enter a title.")
+        try:
+            key = int(cid)
+        except (ValueError, TypeError):
+            key = cid
+        with self._lock:
+            if key not in self._chats:
+                raise KeyError(cid)
+            self._chats[key]["title"] = t
+            self._save()
+        res = self.get(key)
+        if res is None:
+            raise KeyError(cid)
+        return res
+
     def get(self, cid: int) -> dict | None:
         with self._lock:
             c = self._chats.get(cid)
             if c is None:
                 return None
-            return {**c, "items": copy.deepcopy(c["items"]), "wire": list(c["wire"]), "messages": self._messages(c)}
+            from .chat_tools import mask_output
+            ctx = c.get("context", "") or ""
+            scr = c.get("screen")
+            if isinstance(scr, dict):
+                scr = {**scr, "text": mask_output(scr.get("text", ""))}
+            return {**c, "context": mask_output(ctx) if ctx else "",
+                    "screen": scr,
+                    "items": copy.deepcopy(c["items"]), "wire": list(c["wire"]), "messages": self._messages(c)}
 
     @staticmethod
     def _messages(c: dict) -> list[dict]:
@@ -137,8 +172,9 @@ class Chats:
 
     def set_context(self, cid: int, context: str) -> None:
         with self._lock:
-            self._chats[cid]["context"] = context
-            self._save()
+            if cid in self._chats:
+                self._chats[cid]["context"] = context
+                self._save()
 
     def add_item(self, cid: int, kind: str, text: str, **fields) -> int:
         with self._lock:
@@ -150,7 +186,9 @@ class Chats:
         """Add a finished turn and the wire that goes with it. `items` are {"kind", "text", ...fields};
         a "user" item remembers `start`, the length of the wire before the turn."""
         with self._lock:
-            c = self._chats[cid]
+            c = self._chats.get(cid)
+            if c is None:                                         # deleted while the model was answering
+                return
             for it in items:
                 fields = {k: v for k, v in it.items() if k not in ("kind", "text")}
                 if it["kind"] == "user":
@@ -161,8 +199,9 @@ class Chats:
 
     def set_wire(self, cid: int, wire: list[dict]) -> None:
         with self._lock:
-            self._chats[cid]["wire"] = list(wire)
-            self._save()
+            if cid in self._chats:
+                self._chats[cid]["wire"] = list(wire)
+                self._save()
 
     def claim_action(self, cid: int, item_id: int) -> bool:
         """True for the one caller that may now decide this pending action."""
@@ -175,7 +214,8 @@ class Chats:
 
     def set_action(self, cid: int, item_id: int, state: str, detail: str | None = None, undo: dict | None = None) -> None:
         with self._lock:
-            item = self._find(self._chats[cid], item_id)
+            c = self._chats.get(cid)
+            item = self._find(c, item_id) if c is not None else None
             if item is not None:
                 item["action"].update(state=state, detail=detail)
                 item["_undo"] = undo
@@ -201,12 +241,28 @@ class Chats:
 
     @staticmethod
     def view(c: dict) -> dict:
-        """What the page may see: no background context, no model wire, no arguments or undo records."""
+        """What the page may see: no background context, no model wire, no arguments or undo records.
+        Each of the model's messages carries the checks of llm.checks: risky commands in its code, and a claim of
+        something its reply's actions do not show."""
+        from llm.checks import risky_commands, unbacked_claim
         items = []
+        approved: set[str] = set()                                # the actions of the reply so far
+        pending: set[str] = set()
         for i in c["items"]:
             row = {"id": i["id"], "kind": i["kind"], "at": i["at"], "text": i["text"]}
+            if i["kind"] == "user":
+                approved, pending = set(), set()
+            elif i["kind"] == "action":
+                state = i["action"]["state"]
+                if state == "approved":
+                    approved.add(i["action"]["name"])
+                elif state == "pending":
+                    pending.add(i["action"]["name"])
+            elif i["kind"] == "assistant":
+                row["risky"] = risky_commands(i["text"])
+                row["claim"] = unbacked_claim(i["text"], approved, pending)
             if i["kind"] == "tool":
-                row["tool"] = {k: i["tool"].get(k) for k in ("name", "label", "ok")}
+                row["tool"] = {k: i["tool"].get(k) for k in ("name", "label", "ok", "flag")}
             elif i["kind"] == "action":
                 row["action"] = {**{k: i["action"].get(k) for k in ACTION_FIELDS},
                                  "undoable": i["action"]["state"] == "approved" and bool(i.get("_undo"))}
@@ -226,7 +282,7 @@ class Chats:
 
     @staticmethod
     def _undoable(tail: list[dict]) -> list[dict]:
-        return [i for i in reversed(tail) if i["kind"] == "action" and i["action"]["name"] == "write_file"
+        return [i for i in reversed(tail) if i["kind"] == "action" and i["action"]["name"] in ("write_file", "edit_file")
                 and i["action"]["state"] == "approved" and i.get("_undo")]
 
     def rewind_preview(self, cid: int, item_id: int) -> dict:
@@ -254,7 +310,9 @@ class Chats:
             ok, message = undo(rec)
             (done if ok else skipped).append(message)
         with self._lock:
-            c = self._chats[cid]
+            c = self._chats.get(cid)
+            if c is None:                                         # deleted while the files were being put back
+                return {"undone": done, "skipped": skipped}
             idx, _ = self._tail(c, item_id)
             c["wire"] = c["wire"][:c["items"][idx]["_w"]]
             del c["items"][idx:]

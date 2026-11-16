@@ -19,6 +19,7 @@ Reading
 Changing
     POST /api/asks/<id>        {"button": "Help me"} answers an open question
     POST /api/chats/clear      forgets every conversation (and empties chats.jsonl when they are being kept)
+    POST /api/chats/delete     {"ids": [1, 2]} forgets those conversations (files they wrote stay as they are)
     POST /api/chats            {"title"?} starts a conversation; POST /api/chats/<id> {"message"} sends one and returns the reply
     POST /api/chats/<id>/actions/<item> {"approve": true|false} decides a proposed action; the model then carries on
     POST /api/chats/<id>/rewind {"item", "message"?} goes back to one of your messages (undoing files), optionally
@@ -137,6 +138,8 @@ def _classify(detail: str) -> str:
         return "The endpoint refused the API key."
     if "404" in d or "not found" in d or "model" in d and "exist" in d:
         return "The endpoint answered, but not for that model name or path (does the URL end in /v1?)."
+    if "neither 'yes' nor 'no'" in d:
+        return "The endpoint returned log-probabilities, but not a yes/no first token (the model may be in thinking mode)."
     if "logprob" in d or "log-prob" in d:
         return "The endpoint answered without log-probabilities; SAIP needs them to read the model's confidence."
     if "timed out" in d or "timeout" in d:
@@ -154,6 +157,8 @@ class Api:
                  on_ready=None, on_shutdown=None, offers=offers_payload, health=health_payload):
         self.bus, self.runtime, self.port = bus, runtime, port
         self._plat, self._aw = plat, aw
+        self._stops: dict[int, int] = {}                        # chat id -> how many times Stop was pressed
+        self._stops_lock = threading.Lock()
         self.on_ready, self.on_shutdown = on_ready, on_shutdown
         self.offers, self.health = offers, health
 
@@ -200,6 +205,11 @@ class Api:
     def chats_clear(self) -> dict:
         return {"ok": True, "removed": self._chats().clear()}
 
+    def chats_delete(self, ids) -> dict:
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+            raise ApiError(400, "expected {\"ids\": [conversation ids]}")
+        return {"ok": True, "removed": self._chats().delete(ids)}
+
     def _tool_names(self) -> list[str]:
         if getattr(self.runtime, "client", None) is None:
             return []
@@ -227,7 +237,25 @@ class Api:
             raise ApiError(404, "no such conversation")
         return self._view(c)
 
-    def chat_new(self, title: str | None = None) -> dict:
+    def chat(self, cid: int) -> dict:
+        from .chat_tools import mask_output
+        c = self._chats().get(cid)
+        if c is None:
+            raise ApiError(404, "no such conversation")
+        view = self._view(c)
+        ctx = c.get("context") or getattr(self.runtime, "last_context", "") or ""
+        scr = c.get("screen", "") or ""
+        if isinstance(scr, dict):
+            app = scr.get("app")
+            txt = scr.get("text", "")
+            scr_str = f"[{app}]\n{txt}" if app else txt
+        else:
+            scr_str = str(scr)
+        view["context"] = mask_output(ctx) if ctx else ""
+        view["screen"] = mask_output(scr_str) if scr_str else ""
+        return view
+
+    def chat_new(self, title: str | None = None, context: str | None = None, offer: str | None = None) -> dict:
         rt = self._chats() and self.runtime
         screen = None
         try:
@@ -235,20 +263,59 @@ class Api:
             screen = {"app": found.app, "text": found.text} if found is not None else None
         except Exception:
             screen = None
-        cid = rt.chats.create(title or "New chat", rt.snapshot_context() or rt.last_context, screen, live=True)
-        return self.chat_get(cid)
+        ctx = context if context is not None else (rt.snapshot_context() or rt.last_context)
+        chat_title = title
+        if not chat_title:
+            if offer:
+                chat_title = offer[:60]
+            else:
+                chat_title = "New chat"
+        cid = rt.chats.create(chat_title, ctx, screen, first=offer or None, live=context is None)
+        return self.chat(cid)
+
+    def chat_rename(self, cid: int | str, title: str) -> dict:
+        try:
+            c = self._chats().rename(cid, title)
+        except KeyError:
+            raise ApiError(404, "no such conversation") from None
+        except ValueError as e:
+            raise ApiError(400, str(e)) from None
+        return {"ok": True, "chat": self.chat(c["id"]), "chats": self.chats()["chats"]}
+
+    def _stop_count(self, cid: int) -> int:
+        with self._stops_lock:
+            return self._stops.get(cid, 0)
+
+    def chat_stop(self, cid: int | str | None = None) -> dict:
+        """Stop what the model is doing in this chat: its next tool or model call is not made, and whatever it was
+        about to write or propose is dropped, so the transcript stays as it was before the message. A model call
+        already waiting for an answer cannot be interrupted, but its answer is thrown away."""
+        try:
+            key = int(cid)
+        except (TypeError, ValueError):
+            return {"ok": True, "stopped": False}
+        with self._stops_lock:
+            self._stops[key] = self._stops.get(key, 0) + 1
+        return {"ok": True, "stopped": True}
 
     def _record(self, cid: int, wire: list, start: int | None, lead: list, out: dict) -> None:
         """Store what a model turn produced: its tool uses, a proposed action, its words."""
         items = list(lead)
         for e in out["events"]:
-            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"]}})
+            items.append({"kind": "tool", "text": e["label"], "tool": {"name": e["name"], "label": e["label"], "ok": e["ok"],
+                                                                        "flag": e.get("flag")}})
         p = out["pending"]
         if p:
+            from .chat_tools import UNTRUSTED_TOOLS
             pv = p["preview"]
+            seen = self.runtime.chats.get(cid)
+            read = [i["tool"] for i in (seen["items"] if seen else []) if i["kind"] == "tool"] + out["events"]
+            after = list(dict.fromkeys(t["label"] + (" (has text aimed at the model)" if t.get("flag") else "")
+                                       for t in read if t.get("ok") and t.get("name") in UNTRUSTED_TOOLS))
             items.append({"kind": "action", "text": pv.get("title") or p["name"], "_call": p["call_id"], "_args": p["arguments"],
                           "action": {"name": p["name"], "title": pv.get("title") or p["name"], "path": pv.get("path"),
                                      "content": pv.get("content"), "diff": pv.get("diff"), "exists": bool(pv.get("exists")),
+                                     "warning": pv.get("warning"), "after": after[-6:],
                                      "state": "pending", "detail": None}})
         if out["text"]:
             items.append({"kind": "assistant", "text": out["text"]})
@@ -258,7 +325,9 @@ class Api:
 
     def _turn(self, cid: int, wire: list, toolbox) -> dict:
         from llm.chat import chat_turn
-        out = chat_turn(self.runtime.client, wire, toolbox.schemas(), toolbox.run)
+        pressed = self._stop_count(cid)
+        out = chat_turn(self.runtime.client, wire, toolbox.schemas(), toolbox.run,
+                        should_stop=lambda: self._stop_count(cid) != pressed)
         if out["tools_unsupported"]:
             try:
                 self.runtime.tools_unsupported = True
@@ -267,7 +336,7 @@ class Api:
         return out
 
     def chat_send(self, cid: int, message: str) -> dict:
-        from llm.chat import base_messages
+        from llm.chat import Stopped, base_messages
         from llm.client import LLMError
         from .chats import MAX_MESSAGE, Chats
         chats, rt = self._chats(), self.runtime
@@ -293,22 +362,34 @@ class Api:
             if c.get("first"):
                 wire.append({"role": "assistant", "content": c["first"]})
         start = len(wire)
-        wire.append({"role": "user", "content": text})
+        from llm.sanitize import clean
+        wire.append({"role": "user", "content": clean(text)})     # what was pasted may hide characters; the page keeps it
         try:
             out = self._turn(cid, wire, toolbox)
+        except Stopped:
+            return self.chat_get(cid)                           # nothing was recorded: the chat is as it was
         except LLMError as e:
             raise ApiError(502, f"the model did not answer: {e}") from None
         self._record(cid, out["messages"], start, [{"kind": "user", "text": text}], out)
         return self.chat_get(cid)
 
-    def chat_action(self, cid: int, item_id: int, approve: bool) -> dict:
-        from llm.chat import tool_result_message
+    @staticmethod
+    def _needs_confirming(item: dict, approve: bool, confirmed: bool) -> None:
+        """An action proposed after the model read text it was given (files, diffs, the screen, the web) may have been
+        steered by that text, so approving it needs `confirmed` as well: the page asks the person to tick a box."""
+        if approve and item["action"].get("after") and not confirmed and item["action"]["state"] == "pending":
+            raise ApiError(409, "this was proposed after reading " + "; ".join(item["action"]["after"]) +
+                           ". Check it is what you asked for, then confirm")
+
+    def chat_action(self, cid: int, item_id: int, approve: bool, confirmed: bool = False) -> dict:
+        from llm.chat import Stopped, tool_result_message
         from llm.client import LLMError
         chats = self._chats()
         c = chats.get(cid)
         item = None if c is None else next((i for i in c["items"] if i["id"] == item_id and i["kind"] == "action"), None)
         if item is None:
             raise ApiError(404, "no such action")
+        self._needs_confirming(item, approve, confirmed)
         if item["action"]["state"] != "pending" or not chats.claim_action(cid, item_id):
             raise ApiError(409, "that action was already decided")
         if getattr(self.runtime, "client", None) is None:
@@ -330,7 +411,7 @@ class Api:
         wire = c["wire"] + [tool_result_message(item["_call"], result)]
         try:
             out = self._turn(cid, wire, toolbox)
-        except LLMError:
+        except (LLMError, Stopped):
             chats.set_wire(cid, wire)                           # the action stands; the next message continues from here
             return self.chat_get(cid)
         self._record(cid, out["messages"], None, [], out)
@@ -383,6 +464,18 @@ class Api:
     def inspector(self) -> dict:
         entries = list(self.runtime.inspector) if self.runtime else []
         return {"entries": entries[::-1]}
+
+    def inspector_feedback(self, entry_time: float, vote: str | None) -> dict:
+        if vote not in ("up", "down", None):
+            raise ApiError(400, "expected vote to be 'up', 'down', or null")
+        inspector = getattr(self.runtime, "inspector", None)
+        if inspector is not None:
+            for entry in inspector:
+                t = entry.get("time")
+                if t is not None and abs(float(t) - float(entry_time)) < 0.05:
+                    entry["feedback"] = vote
+                    break
+        return {"ok": True, "vote": vote}
 
     def settings(self) -> dict:
         from llm.config import load_settings
@@ -483,20 +576,50 @@ class Api:
             return setup.aw_start(self.plat, self.aw)
         raise ApiError(400, "expected action install or start")
 
-    def test_endpoint(self, base_url: str, model: str, api_key: str | None) -> dict:
+    def test_endpoint(self, base_url: str, model: str = "", api_key: str | None = None) -> dict:
+        from llm.client import LLMError, list_models
         from llm.config import load_settings
         from . import setup
         s = load_settings()
         key = api_key if api_key else s.llm.api_key
-        if not str(base_url).strip() or not str(model).strip():
-            return {"ok": False, "detail": "Enter the endpoint URL and the model name.", "hint": ""}
-        trial = replace(s, llm=replace(s.llm, base_url=str(base_url).strip(), model=str(model).strip(), api_key=key or ""))
+        base = str(base_url).strip()
+        model_name = str(model or "").strip()
+        if not base:
+            return {"ok": False, "detail": "Enter the endpoint URL.", "hint": ""}
+        models: list[str] | None = None
+        if not model_name:
+            try:
+                models = list_models(base, key or "", timeout_s=min(s.llm.timeout_s, 10.0))
+            except LLMError as e:
+                detail = str(e)
+                return {"ok": False, "detail": detail, "hint": _classify(detail)}
+            if not models:
+                return {"ok": False, "detail": "The endpoint returned no models at /models. Enter the model name manually.",
+                        "hint": "No models returned."}
+            if len(models) > 1:
+                return {"ok": False,
+                        "detail": f"Found {len(models)} models at {base}/models. Pick one below and click Test and save.",
+                        "hint": "Multiple models available.", "models": models}
+            model_name = models[0]
+        trial = replace(s, llm=replace(s.llm, base_url=base, model=model_name, api_key=key or ""))
         began = time.time()
         r = setup.check_endpoint(trial)
+        auto_reasoning: str | None = None
+        if r.status != "ok" and "neither 'yes' nor 'no'" in r.detail.lower() and not trial.llm.reasoning_effort:
+            trial_no_think = replace(trial, llm=replace(trial.llm, reasoning_effort="none"))
+            r_no_think = setup.check_endpoint(trial_no_think)
+            if r_no_think.status == "ok":
+                r = r_no_think
+                auto_reasoning = "none"
         took = round(time.time() - began, 2)
-        if r.status == "ok":
-            return {"ok": True, "detail": r.detail, "seconds": took}
-        return {"ok": False, "detail": r.detail, "hint": _classify(r.detail), "seconds": took}
+        out: dict = {"ok": r.status == "ok", "detail": r.detail, "seconds": took, "model": model_name}
+        if auto_reasoning is not None:
+            out["reasoning_effort"] = auto_reasoning
+        if models is not None:
+            out["models"] = models
+        if r.status != "ok":
+            out["hint"] = _classify(r.detail)
+        return out
 
     def request_permission(self, perm_id: str) -> dict:
         from . import permissions
@@ -631,7 +754,7 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                     self._json({"error": "not found"}, 404)
                     return
                 if len(parts) == 3:
-                    self._reply(lambda: api.chat_get(cid))
+                    self._reply(lambda: api.chat(cid))
                     return
                 try:
                     item = int(q["item"])
@@ -689,7 +812,7 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
                 if not isinstance(b.get("approve"), bool):
                     self._json({"error": "expected {\"approve\": true or false}"}, 400)
                     return
-                self._reply(lambda: api.chat_action(cid, item, b["approve"]))
+                self._reply(lambda: api.chat_action(cid, item, b["approve"], b.get("confirmed") is True))
             else:
                 self._json({"error": "not found"}, 404)
 
@@ -743,19 +866,50 @@ def make_handler(bus: Bus, offers=offers_payload, health=health_payload, api: Ap
             if parts == ["api", "chats", "clear"]:
                 self._reply(api.chats_clear)
                 return
+            if parts == ["api", "chats", "delete"]:
+                self._reply(lambda: api.chats_delete(b.get("ids")))
+                return
+            if parts == ["api", "chats", "rename"]:
+                cid = b.get("id")
+                title = b.get("title")
+                if cid is None or title is None:
+                    self._json({"error": "expected {\"id\": ..., \"title\": ...}"}, 400)
+                    return
+                self._reply(lambda: api.chat_rename(cid, title))
+                return
+            if parts == ["api", "chats", "stop"]:
+                self._reply(lambda: api.chat_stop(b.get("id")))
+                return
+            if parts == ["api", "inspector", "feedback"]:
+                time_val = b.get("time")
+                if time_val is None:
+                    self._json({"error": "missing 'time'"}, 400)
+                    return
+                try:
+                    t_float = float(time_val)
+                except (ValueError, TypeError):
+                    self._json({"error": "invalid 'time'"}, 400)
+                    return
+                vote = b.get("vote")
+                self._reply(lambda: api.inspector_feedback(t_float, vote))
+                return
             if parts[:2] == ["api", "chats"] and len(parts) > 2:
                 self._chat_post(parts, b)
                 return
             routes = {
                 "/api/settings": lambda: api.save_settings(b),
                 "/api/setup/aw": lambda: api.aw_action(*_need(body, "action")),
-                "/api/setup/endpoint": lambda: api.test_endpoint(*_need(body, "base_url", "model"), b.get("api_key")),
+                "/api/setup/endpoint": lambda: api.test_endpoint(*_need(body, "base_url"), b.get("model", ""), b.get("api_key")),
                 "/api/setup/permissions": lambda: api.request_permission(*_need(body, "id")),
                 "/api/setup/keytest": lambda: api.key_test(b.get("seconds", 6)),
                 "/api/setup/hook": lambda: api.hook_action(*_need(body, "action")),
                 "/api/repos/preview": lambda: api.repo_preview(*_need(body, "folder")),
                 "/api/repos": lambda: api.repo_action(*_need(body, "action", "folder")),
-                "/api/chats": lambda: api.chat_new(b.get("title")),
+                "/api/chats": lambda: api.chat_new(
+                    b.get("title"),
+                    b.get("context"),
+                    b.get("offer") if isinstance(b.get("offer"), str) else (b.get("offer", {}).get("message") if isinstance(b.get("offer"), dict) else None)
+                ),
                 "/api/setup/finish": api.finish,
                 "/api/autostart": lambda: api.set_autostart(bool(_need(body, "enabled")[0])),
                 "/api/shutdown": api.shutdown,

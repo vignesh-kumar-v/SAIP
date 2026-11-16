@@ -50,6 +50,8 @@ class OpenAIChatClient:
             body.update(logprobs=True, top_logprobs=top_logprobs)
         if self.cfg.reasoning_effort:
             body["reasoning_effort"] = self.cfg.reasoning_effort
+            if self.cfg.reasoning_effort == "none":
+                body["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
         if self.cfg.api_key:
             headers["Authorization"] = "Bearer " + self.cfg.api_key
@@ -70,6 +72,8 @@ class OpenAIChatClient:
             body.update(tools=tools, tool_choice="auto")
         if self.cfg.reasoning_effort:
             body["reasoning_effort"] = self.cfg.reasoning_effort
+            if self.cfg.reasoning_effort == "none":
+                body["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
         if self.cfg.api_key:
             headers["Authorization"] = "Bearer " + self.cfg.api_key
@@ -119,3 +123,30 @@ def parse_choices(data: dict, want_logprobs: bool) -> list[Choice]:
                            "that supports logprobs (vLLM, llama.cpp server, Ollama /v1)")
         out.append(Choice(text=text, first_token_logprobs=top, finish_reason=c.get("finish_reason")))
     return out
+
+
+def list_models(base_url: str, api_key: str = "", timeout_s: float = 10.0) -> list[str]:
+    """Query GET {base_url}/models on an OpenAI-compatible server and return available model IDs."""
+    url = base_url.rstrip("/") + "/models"
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise LLMError(f"endpoint returned HTTP {e.code}: {e.read()[:200]!r}") from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise LLMError(f"cannot reach {url}: {e}") from e
+    except ValueError as e:
+        raise LLMError(f"invalid JSON from {url}: {e}") from e
+    raw = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        raise LLMError(f"unexpected /models reply shape: {str(data)[:200]}")
+    seen: list[str] = []
+    for item in raw:
+        mid = item.get("id") if isinstance(item, dict) else None
+        if isinstance(mid, str) and mid.strip() and mid not in seen:
+            seen.append(mid)
+    return seen

@@ -17,18 +17,23 @@ import re
 from dataclasses import dataclass
 
 from llm.privacy import is_blocked
+from llm.sanitize import clean
 
 TERMINALS = ("terminal", "iterm", "ghostty", "kitty", "wezterm", "alacritty", "warp", "hyper", "tabby")
 SEP = "<<SAIP>>"
 MIN_CHARS = 20                       # less than this is a blank page, not context
 
-_SECRETS = [
+# Tokens that look like secrets wherever they appear (screen text, typed text and code alike).
+TOKEN_SECRETS = [
     re.compile(r"\b(sk|pk|rk|ghp|gho|xox[abp])[-_][A-Za-z0-9_\-]{16,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*\S+"),
     # a long unbroken mix of letters and digits (a token); slashes are excluded so file paths survive
     re.compile(r"\b(?=[A-Za-z0-9+_\-]*\d)(?=[A-Za-z0-9+_\-]*[A-Za-z])[A-Za-z0-9+_\-]{40,}\b"),
 ]
+# "password: ..." in what the person sees or types. Too eager for code (it would hide `api_key: str`), so the chat
+# tools mask code with their own, narrower rules instead.
+_SECRETS = [*TOKEN_SECRETS[:2], re.compile(r"(?i)\b(password|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*\S+"),
+            TOKEN_SECRETS[2]]
 
 
 @dataclass(frozen=True)
@@ -107,7 +112,7 @@ def parse(output: str, private_apps: tuple, limit: int) -> Screen | None:
         cursor = int(float(cur))
     except ValueError:
         cursor = 0
-    body = redact(window_text(text, cursor, limit, tail=app.lower().startswith(TERMINALS)))
+    body = redact(window_text(clean(text), cursor, limit, tail=app.lower().startswith(TERMINALS)))
     return Screen(app, body) if len(body) >= MIN_CHARS else None
 
 
@@ -115,7 +120,7 @@ def typed_for_model(text: str | None) -> str | None:
     """Typed text as the model sees it: obvious secrets masked, nothing else filtered. None when there is none."""
     if not text or not text.strip():
         return None
-    return redact(text).strip() or None
+    return redact(clean(text)).strip() or None
 
 
 def copy_to_clipboard(text: str) -> bool:

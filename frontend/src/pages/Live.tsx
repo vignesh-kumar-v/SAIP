@@ -3,9 +3,11 @@ import { useEffect, useMemo, useState } from "react";
 import { ScoreChart } from "../components/ScoreChart";
 import { GateMeter, WhyBars } from "../components/Signals";
 import { Card, CardHead, Count, Empty, STATE_COLOR, cx } from "../components/ui";
+import { post } from "../lib/api";
 import { clock, clockS, duration, two } from "../lib/format";
+import { useJson } from "../lib/hooks";
 import { PAUSE_WORDS, STATE_WORDS, stateOf, stuckByApp, useLive } from "../lib/store";
-import type { Episode, LogEvent } from "../lib/types";
+import { GATE_PRESETS, type Episode, type LogEvent, type Settings } from "../lib/types";
 
 const RANGES = [
   { label: "5 min", s: 300 },
@@ -192,9 +194,21 @@ export function Live() {
   const ticks = useLive((s) => s.ticks);
   const decisions = useLive((s) => s.decisions);
   const episodes = useLive((s) => s.episodes);
+  const { data: settings, reload: reloadSettings } = useJson<Settings>("/api/settings");
   const [range, setRange] = useState(1800);
   const last = ticks[ticks.length - 1];
   const lastDecision = decisions[decisions.length - 1];
+
+  const currentM0 = settings?.gate?.m0;
+  const activePreset = GATE_PRESETS.find((p) => currentM0 !== undefined && Math.abs(p.gate.m0 - currentM0) < 0.05);
+
+  const applyPreset = async (gate: Record<string, number>) => {
+    try {
+      await post("/api/settings", { gate });
+      reloadSettings();
+    } catch {}
+  };
+
   return (
     <div className="space-y-5">
       <Hero />
@@ -235,8 +249,38 @@ export function Live() {
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Card>
-          <CardHead title="Last model check" hint="Speak only if the chance you'd accept clears a bar set by how stuck you look." />
+          <CardHead
+            title="Last model check"
+            hint="Speak only if the chance you'd accept clears a bar set by how stuck you look."
+            right={
+              <div className="flex items-center rounded-xl border border-line bg-canvas p-0.5">
+                {GATE_PRESETS.map((p) => {
+                  const isCurrent = activePreset?.id === p.id;
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => applyPreset(p.gate)}
+                      title={p.caption}
+                      className={cx(
+                        "rounded-[10px] px-2.5 py-1 text-[12px] font-medium transition-colors",
+                        isCurrent ? "bg-raised text-ink shadow-xs" : "text-muted hover:text-ink"
+                      )}
+                    >
+                      {p.name}
+                    </button>
+                  );
+                })}
+                {!activePreset && currentM0 !== undefined && (
+                  <span className="px-2 py-1 text-[11.5px] text-faint">Custom</span>
+                )}
+              </div>
+            }
+          />
           <GateMeter d={lastDecision} />
+          <div className="border-t border-line px-5 py-2.5 text-[12px] text-faint">
+            <span className="font-medium text-ink">{activePreset ? activePreset.name : "Custom"} sensitivity:</span>{" "}
+            {activePreset ? activePreset.caption : `Custom threshold (m₀ = ${two(currentM0 ?? 0)}).`}
+          </div>
         </Card>
         <Feed />
       </div>

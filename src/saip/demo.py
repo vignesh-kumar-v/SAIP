@@ -199,12 +199,13 @@ class DemoApi(Api):
                      {"events": events, "pending": pending, "text": words})
         return self.chat_get(cid)
 
-    def chat_action(self, cid, item_id, approve):
+    def chat_action(self, cid, item_id, approve, confirmed=False):
         chats = self.runtime.chats
         c = chats.get(cid)
         item = None if c is None else next((i for i in c["items"] if i["id"] == item_id and i["kind"] == "action"), None)
         if item is None:
             raise ApiError(404, "no such action")
+        self._needs_confirming(item, approve, confirmed)
         if not chats.claim_action(cid, item_id):
             raise ApiError(409, "that action was already decided")
         time.sleep(0.6)
@@ -219,6 +220,15 @@ class DemoApi(Api):
                             {"role": "assistant", "content": words}]
         self._record(cid, wire, None, [], {"events": [], "pending": None, "text": words})
         return self.chat_get(cid)
+
+    def chat_rename(self, cid, title):
+        return super().chat_rename(cid, title)
+
+    def chat_stop(self, cid=None):
+        return super().chat_stop(cid)
+
+    def inspector_feedback(self, entry_time, vote):
+        return super().inspector_feedback(entry_time, vote)
 
     # ---- changing (in memory only) ----
     def save_settings(self, body: dict) -> dict:
@@ -241,14 +251,18 @@ class DemoApi(Api):
         time.sleep(0.8)
         return {"ok": True, "detail": "running"}
 
-    def test_endpoint(self, base_url, model, api_key):
+    def test_endpoint(self, base_url, model="", api_key=None):
         time.sleep(0.9)
-        if not str(base_url).strip() or not str(model).strip():
-            return {"ok": False, "detail": "Enter the endpoint URL and the model name.", "hint": ""}
-        if "fail" in str(base_url):
+        base = str(base_url).strip()
+        model_name = str(model or "").strip()
+        if not base:
+            return {"ok": False, "detail": "Enter the endpoint URL.", "hint": ""}
+        if "fail" in base:
             return {"ok": False, "detail": "cannot reach http://fail: Connection refused",
                     "hint": "Could not reach that URL.", "seconds": 0.9}
-        return {"ok": True, "detail": f"{base_url} answered with log-probabilities (p_yes = 0.12)", "seconds": 0.42}
+        if not model_name:
+            model_name = "Qwen/Qwen2.5-7B-Instruct"
+        return {"ok": True, "detail": f"{base} answered with log-probabilities (p_yes = 0.12)", "seconds": 0.42, "model": model_name}
 
     def request_permission(self, perm_id):
         return {"ok": True}
