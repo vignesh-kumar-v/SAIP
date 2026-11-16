@@ -1,5 +1,19 @@
 # SAIP's gate on ProactiveBench
 
+> **Read this first. This is an exploratory run, not a held-out test.**
+>
+> - **The stuck score is hand-written for these sessions.** `event_stuck_score` and `breakpoint_state_score` are keyword
+>   rules (for example "kimi.ai", "deepseek", "code.exe", "ctrl_l") written while looking at ProactiveBench's own events,
+>   and then scored on the same 12 sessions. They are not SAIP's classifier, and the numbers are in-sample.
+> - **`saip` is not the gate the app runs.** With the default `alpha` and `beta` (ln 3 and ln 2), `bench` replaces both
+>   with 3.0, and it adds session logic (a wait carried to the next step, a cooldown after speaking) that the `prism`
+>   rows do not get. `saip` here means "this experimental variant".
+> - **The model's own signal is still weak.** `p_need` and `p_accept` have AUROC about 0.60 to 0.62, as with the plain 9B
+>   model. Whatever SAIP gains here comes from the hand-written rules, not from better probabilities.
+> - **Twelve sessions.** The intervals are wide, and most of the differences below sit inside them.
+> - The team's plan is to choose settings on development data only and test once at the end. This run does not follow
+>   that plan, so it must not be quoted as a test result.
+
 Evaluation of SAIP's decision gate on ProactiveBench's test set (12 sessions, 233 steps, 87 where an offer was wanted),
 scored with `prism-festinalente/Qwen3-8B-PRISM`. Run on 2026-11-12. To repeat it, clone
 [thunlp/ProactiveAgent](https://github.com/thunlp/ProactiveAgent) into `ProactiveAgent/` and run:
@@ -36,21 +50,23 @@ python -m llm bench --prompt-mode proactive
 
 ## What the results show
 
-1. **SAIP cuts false alarms by more than half**: Calibrated `saip` reaches **0.79 precision** and **0.21 false alarms**
-   across the benchmark (compared to 0.51 precision and 0.49 false alarms for PRISM), while maintaining 0.71 overall accuracy.
+1. **SAIP's false-alarm rate is lower, mostly because it speaks much less**: Calibrated `saip` reaches **0.79 precision** and
+   **0.21 false alarms** across the benchmark (PRISM: 0.51 and 0.49), but recall is **0.31** against 0.44 and F1 is
+   **0.45** against 0.47, so it finds fewer of the wanted moments. The F1 intervals overlap almost completely.
    In coding sessions, SAIP drops false alarms down to **0.14** (vs 0.46 for PRISM).
-2. **Cross-fitted centering maximizes recall while beating PRISM's F1**: `saip-centered` reaches **0.59 recall**
+2. **Cross-fitted centering gives a higher F1 than PRISM, within the intervals**: `saip-centered` reaches **0.59 recall**
    and **0.55 F1** across all sessions (outperforming PRISM's 0.44 recall and 0.47 F1, and beating always-speaking at 0.54),
    with a lower false-alarm rate (0.48 vs 0.49). In coding, `saip-centered` reaches **0.60 F1** (vs 0.51 for PRISM).
-3. **Dramatic gains at matched recall**:
+3. **Gains at matched recall** (each policy's `m0` is tuned on these same sessions to hit the recall, to extreme values
+   for `saip`: 7.8 and 34.1):
    - Matching PRISM's recall (0.44): SAIP improves precision to 0.55, lowers false alarms to 0.45, and saves user burden
      (speaking on 30% of steps vs 32%).
    - Matching high recall (0.80): SAIP and `saip-centered` achieve **0.51 to 0.52 precision** (vs 0.41 for PRISM), drop
      false alarms to **0.48–0.49** (vs 0.59 for PRISM), increase F1 to **0.62–0.63** (vs 0.54 for PRISM), and reduce
      interruptions from 73% of steps down to 57–58%.
 4. **Higher overall burden-benefit efficiency (AUDBC)**: Over the full cost sweep ($m_0 \in [0.05, 50.0]$), both
-   `saip` (**0.234**) and `saip-centered` (**0.237**) substantially exceed PRISM (**0.212**), demonstrating
-   systematic superiority across all user tolerance profiles.
+   `saip` (**0.234**) and `saip-centered` (**0.237**) substantially exceed PRISM (**0.212**), a small
+   difference, with no interval reported for it.
 
 ## The report
 
