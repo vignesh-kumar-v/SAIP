@@ -86,7 +86,8 @@ def cmd_bench(a) -> int:
             print(f"steps {done}/{total}  {time.time() - t0:.0f}s", file=sys.stderr)
 
     skipped: list = []
-    rows = bench.run_probes(client, sessions, Path(a.cache), a.history, progress, model, skipped)
+    rows = bench.run_probes(client, sessions, Path(a.cache), a.history, progress, model, skipped,
+                            prompt_mode=a.prompt_mode, slow_margin=a.slow_margin, gate=settings.gate)
     for name, i, err in skipped:
         print(f"skipped {name} step {i}: {err}", file=sys.stderr)
     print(bench.report(rows, settings, len(skipped), model, a.mock))
@@ -124,6 +125,10 @@ def main(argv=None) -> int:
     b.add_argument("--out", default="data/bench/rows.jsonl", help="write per-step rows as jsonl")
     b.add_argument("--config", help="path to private.toml")
     b.add_argument("--limit", type=int, default=0, help="probe only the first N steps")
+    b.add_argument("--prompt-mode", choices=["saip", "proactive", "prism-schema"], default="saip",
+                   help="saip (default), proactive, or prism-schema (ProactiveBench-native schema)")
+    b.add_argument("--slow-margin", type=float, default=0.0,
+                   help="if > 0, run a counterfactual reasoning pass when |p_accept - tau| <= margin")
     b.set_defaults(fn=cmd_bench)
     args = ap.parse_args(argv)
     return args.fn(args)

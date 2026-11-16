@@ -180,9 +180,180 @@ def test_cli_mock_runs_and_reports(data, tmp_path, capsys):
     assert len(out.read_text().splitlines()) == 15 and "steps 10/15" in text.err
     assert main(["bench", "--mock", "--data", str(data), "--cache", str(cache), "--out", str(out), "--limit", "4"]) == 0
     assert len(out.read_text().splitlines()) == 4
+    # Test CLI with --prompt-mode prism-schema
+    out_prism, cache_prism = tmp_path / "rows_prism.jsonl", tmp_path / "probes_prism.jsonl"
+    code_prism = main(["bench", "--mock", "--data", str(data), "--cache", str(cache_prism),
+                       "--out", str(out_prism), "--prompt-mode", "prism-schema", "--limit", "3"])
+    assert code_prism == 0
+    assert len(out_prism.read_text().splitlines()) == 3
 
 
 def test_report_counts_wait(data):
     rows = rows_for(LABELS)
     text = bench.report(rows, load_settings(None), skipped=2, model="x")
-    assert "skipped: 2" in text and "model: x" in text and "answered WAIT" in text
+    assert "skipped: 2" in text and "model: x" in text and "answered WAIT" in text and "AUDBC" in text
+
+
+def test_audbc_bounds_and_non_cost_policies():
+    rows = rows_for(LABELS)
+    assert bench.audbc(rows, "fixed", G) is None
+    for name in ("static-cost", "prism", "saip"):
+        score = bench.audbc(rows, name, G)
+        assert score is not None and 0.0 <= score <= 1.0
+
+
+def test_proactive_prompt_and_slow_margin_cache_separately(data, tmp_path):
+    sessions = bench.take(bench.load_sessions(data), 3)
+    cache = tmp_path / "probes.jsonl"
+    c1 = Scripted()
+    r1 = bench.run_probes(c1, sessions, cache, model="m", prompt_mode="proactive")
+    assert len(r1) == 3 and c1.calls == 9
+    c2 = Scripted()
+    r2 = bench.run_probes(c2, sessions, cache, model="m", prompt_mode="proactive", slow_margin=1.0)
+    assert len(r2) == 3 and c2.calls == 18   # 3 fast + (1 thought + 2 re-probes) per step when margin=1.0
+
+
+def test_event_stuck_score():
+    smooth_steps = [
+        (100.0, "User types next line of code", False),
+        (110.0, "User creates new function", False),
+        (120.0, "User runs clean tests successfully", False),
+    ]
+    s_smooth = Session("test_smooth", "code", smooth_steps)
+    assert bench.event_stuck_score(s_smooth, 2) == 0.0
+
+    troubled_steps = [
+        (100.0, "User switches to 'Code.exe' without performing any actions", False),
+        (110.0, "The user remains on 'Code.exe' idle", False),
+        (120.0, "User opens browser and searches stack overflow for tutorial", False),
+        (130.0, "User encounters error and exception in terminal", True),
+    ]
+    s_troubled = Session("test_troubled", "code", troubled_steps)
+    score = bench.event_stuck_score(s_troubled, 3)
+    assert 0.0 < score <= 1.0
+    assert score >= 0.4
+
+    heavy_steps = [
+        (100.0 + 10 * k, f"error fail exception bug debug issue on 'file.py' without performing idle search google {k}", True)
+        for k in range(10)
+    ]
+    s_heavy = Session("test_heavy", "code", heavy_steps)
+    assert bench.event_stuck_score(s_heavy, 9) == 1.0
+
+    old_steps = [
+        (100.0, "fatal error fail exception", True),
+        (110.0, "without performing idle", True),
+    ] + [(120.0 + 10 * k, f"smooth action {k}", False) for k in range(8)]
+    s_old = Session("test_old", "code", old_steps)
+    assert bench.event_stuck_score(s_old, 9) == 0.0
+
+
+class PrismScriptedClient:
+    def __init__(self, propose_task=True, malformed_json=False):
+        self.calls = 0
+        self.propose_task = propose_task
+        self.malformed_json = malformed_json
+
+    def complete(self, messages, *, max_tokens=1, temperature=0.0, logprobs=False, top_logprobs=10, n=1):
+        self.calls += 1
+        sys_content = messages[0]["content"] if messages else ""
+        user_content = messages[-1]["content"] if messages else ""
+
+        if sys_content == bench.PRISM_SCHEMA_SYSTEM or max_tokens > 10:
+            if self.malformed_json:
+                return [Choice("I think the user needs assistance with debugging.")]
+            task = "Assist with fixing failing tests" if self.propose_task else None
+            data = {
+                "Purpose": "Fixing a bug in test",
+                "Thoughts": "The user saw an error in terminal",
+                "Proactive Task": task,
+                "Response": "I can help fix the error",
+            }
+            return [Choice(f"```json\n{json.dumps(data)}\n```")]
+
+        p = 0.8 if "need help" in user_content else 0.6 if "accept" in user_content else 0.4
+        return [Choice("Yes", {"Yes": math.log(p), "No": math.log(1 - p)})]
+
+
+def test_prism_schema_prompt_mode(data, tmp_path):
+    sessions = bench.load_sessions(data)[:2]
+
+    cache1 = tmp_path / "prism1.jsonl"
+    c1 = PrismScriptedClient(propose_task=True)
+    rows1 = bench.run_probes(c1, sessions, cache1, model="m", prompt_mode="prism-schema")
+    assert len(rows1) == 11
+    assert c1.calls == 11 * 4
+    assert rows1[0].p_accept == pytest.approx(0.6)
+
+    cache2 = tmp_path / "prism2.jsonl"
+    c2 = PrismScriptedClient(propose_task=False)
+    rows2 = bench.run_probes(c2, sessions, cache2, model="m", prompt_mode="prism-schema")
+    assert len(rows2) == 11
+    assert rows2[0].p_accept == pytest.approx(0.3)
+
+    cache3 = tmp_path / "prism3.jsonl"
+    c3 = PrismScriptedClient(malformed_json=True)
+    rows3 = bench.run_probes(c3, sessions, cache3, model="m", prompt_mode="prism-schema")
+    assert len(rows3) == 11
+
+
+def test_saip_gate_centering_and_matched_recall_report():
+    flat = replace(G, alpha=0.0, beta=0.0)
+    assert bench._saip_gate(flat).m0 == pytest.approx(G.m0)
+
+    centered = bench._saip_gate(G, s_center=0.35)
+    expected_m0 = G.m0 * math.exp(G.alpha * (1.0 - 0.35) - G.beta * 0.35)
+    assert centered.m0 == pytest.approx(expected_m0)
+
+    rows = rows_for(LABELS)
+    rep = bench.matched_recall_report(rows, G, target_recall=0.75)
+    assert "matched recall target: 0.75" in rep
+    assert "prism" in rep and "saip" in rep and "saip-centered" in rep
+
+    full_report = bench.report(rows, load_settings(None))
+    assert "saip-centered" in full_report
+    assert "matched recall comparison (calibrated)" in full_report
+
+
+def test_breakpoint_state_score_and_session_decisions():
+    steps = [
+        (100.0, "User scrolls through search results", False),
+        (110.0, "The user remained on the page idle", False),
+        (120.0, "The user switched to window without performing any action", False),
+        (130.0, "User pressed ctrl_l and cmdv rapidly", False),
+    ]
+    s_text = Session("sess1", "writing", steps)
+    sc0 = bench.breakpoint_state_score(s_text, 0, 0.5)
+    assert sc0 == pytest.approx(0.90)
+
+    sc1 = bench.breakpoint_state_score(s_text, 1, 0.5)
+    assert sc1 >= 0.70
+
+    # "without performing" / "switched to" lowers receptivity
+    sc2 = bench.breakpoint_state_score(s_text, 2, 0.5)
+    assert sc2 <= 0.05
+
+    # raw keystroke bursts like ctrl_l and cmdv lower s
+    sc3 = bench.breakpoint_state_score(s_text, 3, 0.5)
+    assert sc3 < 0.20
+
+    s_code = Session("sess_code", "code", steps)
+    sc_code = bench.breakpoint_state_score(s_code, 0, 0.1)
+    assert sc_code == pytest.approx(0.80 * 0.90 + 0.20 * 0.1)
+
+    r0 = Row("sA", "code", 0, True, 0.60, 0.82, 0.10)
+    r1 = Row("sA", "code", 1, True, 0.10, 0.10, 0.60)
+    r2 = Row("sA", "code", 2, True, 0.60, 0.82, 0.40)
+    rows = [r0, r1, r2]
+
+    # Individually, r1 alone would stay quiet, r2 alone would speak
+    assert bench.policy("saip", r1, G) is False
+    assert bench.policy("saip", r2, G) is True
+
+    # Under session-aware _decisions:
+    # - r0 waits in flow
+    # - r1 speaks at breakpoint due to carried-forward pending proposal
+    # - r2 cools down post-SPEAK (s_eff = 0.15) and stays quiet / waits
+    spoke, waits = bench._decisions(rows, "saip", G)
+    assert spoke == [False, True, False]
+    assert waits == 2
